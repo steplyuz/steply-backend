@@ -70,7 +70,7 @@ class ReadingService(PaperVersionedExamMixin):
         questions = await self._question_dicts_for_paper(test_id)
         return await self._paper_service(test_id).lock(questions, locked_by_user_id, partial=partial)
 
-    # ================================================================
+        # ================================================================
     #  PAPER PDF (module-specific)
     # ================================================================
     async def generate_paper_pdf(self, test_id: str) -> bytes:
@@ -97,6 +97,7 @@ class ReadingService(PaperVersionedExamMixin):
                 "title": part.title,
                 "description": part.description,
                 "passage": part.passage,
+                "image_url": part.image_url,
                 "questions": questions_payload,
             })
 

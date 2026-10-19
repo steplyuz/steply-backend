@@ -20,6 +20,8 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, KeepTogether
+from .listening_paper_pdf import render_listening_paper
+from .reading_paper_pdf import render_reading_paper
 
 from .template_paper_pdf import (
     READING_MASTER,
@@ -207,25 +209,21 @@ def _fallback_paper(exam: dict, skill: str) -> bytes:
 
 
 def render_reading_pdf(exam: dict) -> bytes:
-    """Use official master if it fits; otherwise generate a readable fallback."""
     if READING_MASTER.is_file():
         try:
             return render_reading_template(exam)
         except (FileNotFoundError, ValueError):
-            # A content-heavy paper must remain downloadable even if a fixed
-            # official slot cannot fit it; the fallback explicitly labels itself.
             pass
-    return _fallback_paper(exam, "READING")
+    return render_reading_paper(exam)
 
 
 def render_listening_pdf(exam: dict) -> bytes:
-    """Use official master if it fits; otherwise generate a readable fallback."""
     if LISTENING_MASTER.is_file():
         try:
             return render_listening_template(exam)
         except (FileNotFoundError, ValueError):
             pass
-    return _fallback_paper(exam, "LISTENING")
+    return render_listening_paper(exam)
 
 
 def render_writing_pdf(exam: dict) -> bytes:

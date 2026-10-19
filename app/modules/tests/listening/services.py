@@ -119,7 +119,7 @@ class ListeningService(PaperVersionedExamMixin):
         questions = await self._question_dicts_for_paper(exam_id)
         return await self._paper_service(exam_id).lock(questions, locked_by_user_id, partial=partial)
 
-    # ================================================================
+        # ================================================================
     #  PAPER PDF (module-specific)
     # ================================================================
     async def generate_paper_pdf(self, exam_id: str) -> bytes:
@@ -137,6 +137,7 @@ class ListeningService(PaperVersionedExamMixin):
                     "question_number": q.question_number,
                     "type": q.type.value if hasattr(q.type, "value") else q.type,
                     "text": q.text,
+                    "group_title": q.group_title,
                     "options": [{"label": o.label, "value": o.value} for o in q.options],
                 }
                 for q in sorted(part.questions, key=lambda q: q.question_number)
@@ -148,6 +149,9 @@ class ListeningService(PaperVersionedExamMixin):
                 "task_type": part.task_type,
                 "context": part.context,
                 "passage": part.passage,
+                "image_url": part.image_url,
+                "map_image": part.map_image,
+                "example_json": part.example_json,
                 "options": [{"label": o.label, "value": o.value} for o in part.options],
                 "questions": questions_payload,
             })

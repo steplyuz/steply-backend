@@ -77,6 +77,8 @@ class ListeningPart(Base):
     context: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     passage: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     map_image: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    image_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    example_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     __table_args__ = (UniqueConstraint("exam_id", "external_id", name="uq_listening_part_external_id"),)
 
@@ -107,6 +109,7 @@ class ListeningQuestion(Base):
 
     text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     correct_answer: Mapped[str] = mapped_column(String, nullable=False)
+    group_title: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
 
     __table_args__ = (UniqueConstraint("part_id", "external_id", name="uq_listening_question_external_id"),)
 
