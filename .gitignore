@@ -1,0 +1,33 @@
+# runtime
+*.db
+*.sqlite3
+enwis.db
+
+# venv
+venv/
+
+# uploads
+static/avatars/
+static/listening_audio/
+
+# sessions/secrets
+sessions/
+*.session
+.env
+
+# python bytecode / caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# runtime-generated uploads (application data, not source) -- see docs/ARCHITECTURE.md "Storage"
+static/speaking_audio/
+static/billing_receipts/
+static/applicant_photos/
+
+# runtime private storage (audio, receipts, submissions) -- bazadan alohida zaxiralang
+storage/
+static/templates/ANSWER_SHEET_MASTER_OMR.png
+
+# redis dump
+dump.rdb
