@@ -37,6 +37,24 @@ class ContentLockService:
         if await self.is_locked():
             raise HTTPException(409, f"{what} locked qilingan. Uni o'zgartirish yoki o'chirish mumkin emas.")
 
+    async def unlock(self, skill: str) -> None:
+        """LOCK OFF: testni qayta tahrirlashga ochadi.
+
+        Versiya qatori o'chirilmaydi (tarix va eski natijalar saqlanadi), faqat
+        is_locked=False bo'ladi. Mock imtihonda ishlatilgan yoki ishlanayotgan
+        urinishi bor test ochilmaydi.
+        """
+        from app.modules.exams.mock.usage import ensure_editable, ensure_not_in_mock_exam
+
+        version = await self.latest()
+        if version is None or not version.is_locked:
+            return
+        await ensure_not_in_mock_exam(self.db, skill, self.exam_id)
+        await ensure_editable(self.db, skill=skill, module=self.module, test_id=self.exam_id)
+        version.is_locked = False
+        version.locked_at = None
+        await self.db.flush()
+
     async def lock(
         self,
         snapshot: Dict[str, Any],
