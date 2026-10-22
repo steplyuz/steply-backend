@@ -261,11 +261,15 @@ async def update_reading_test(
 )
 async def delete_reading_test(
     test_id: str,
+    force: bool = Query(False, description="Faqat SUPER_ADMIN: natija va urinishlar bilan birga o'chirish"),
     db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    """Testni o'chirish"""
+    """Testni o'chirish. Natija bor bo'lsa 409 (faolsizlantiring yoki super admin force=true)."""
+    if force and user.global_role != UserRole.SUPER_ADMIN:
+        raise HTTPException(status_code=403, detail="force=true faqat super admin uchun")
     service = ReadingService(db)
-    success = await service.delete_test(test_id)
+    success = await service.delete_test(test_id, force=force)
     if not success:
         raise HTTPException(status_code=404, detail="Test topilmadi")
 
@@ -457,6 +461,16 @@ async def lock_reading_exam(
     if errors:
         return LockResultResponse(success=False, version=None, errors=errors)
     return LockResultResponse(success=True, version=version, errors=[])
+
+
+@admin_router.post(
+    "/{test_id}/new-version",
+    response_model=ExamVersionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_reading_new_version(test_id: str, db: AsyncSession = Depends(get_db)):
+    """Lock qilingan Reading testni tahrirlash uchun yangi DRAFT versiya ochadi."""
+    return await ReadingService(db).create_new_version(test_id)
 
 
 @admin_router.get("/{test_id}/paper-pdf")
