@@ -46,8 +46,11 @@ class WritingService:
     async def update_exam(self, exam_id: str, data):
         return await self.admin_service.update_exam(exam_id, data)
 
-    async def delete_exam(self, exam_id: str):
-        return await self.admin_service.delete_exam(exam_id)
+    async def delete_exam(self, exam_id: str, force: bool = False):
+        return await self.admin_service.delete_exam(exam_id, force=force)
+
+    async def unlock_exam(self, exam_id: str):
+        return await self.admin_service.unlock_exam(exam_id)
 
     async def lock_exam(self, exam_id: str, locked_by_user_id=None):
         version, errors = await self.admin_service.lock_exam(exam_id, locked_by_user_id)
