@@ -126,7 +126,7 @@ class PlanCreate(BaseModel):
     tier: SubscriptionTier
     ai_limit: int = Field(default=0, ge=0)
     exam_limit: int = Field(default=0, ge=0)
-    included_skills: list[str] = Field(default_factory=lambda: ["READING", "LISTENING", "WRITING"])
+    included_skills: list[str] = Field(default_factory=lambda: ["READING", "LISTENING", "WRITING", "SPEAKING"])
     ai_enabled: bool = True
     discount_percent: int = Field(default=0, ge=0, le=100)
     is_active: bool = True
