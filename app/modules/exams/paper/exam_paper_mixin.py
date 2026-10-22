@@ -107,7 +107,7 @@ class PaperVersionedExamMixin:
             return latest
         await ensure_editable(
             self.db, skill=self.USAGE_SKILL, module=self.PAPER_MODULE, test_id=exam_id,
-            result_model=self.RESULT_MODEL, result_col=self.RESULT_COL,
+            result_model=self.RESULT_MODEL, result_col=type(self).RESULT_COL,
         )
         questions = await self._question_dicts_for_paper(exam_id)
         version = await paper.sync_draft(questions)

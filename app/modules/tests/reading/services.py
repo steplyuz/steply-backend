@@ -342,9 +342,9 @@ class ReadingService(PaperVersionedExamMixin):
             return False
         await ensure_deletable(
             self.db, skill=self.USAGE_SKILL, module=self.PAPER_MODULE, test_id=test_id,
-            result_model=self.RESULT_MODEL, result_col=self.RESULT_COL, force=force,
+            result_model=self.RESULT_MODEL, result_col=type(self).RESULT_COL, force=force,
         )
-        await purge_results(self.db, self.RESULT_MODEL, self.RESULT_COL, test_id)
+        await purge_results(self.db, self.RESULT_MODEL, type(self).RESULT_COL, test_id)
         await purge_practice_attempts(self.db, self.USAGE_SKILL, test_id)
         await purge_exam_versions(self.db, self.PAPER_MODULE, test_id)
         await self.db.delete(test)
