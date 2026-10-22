@@ -36,7 +36,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.modules.tests.attempts.timer import remaining_seconds, utc_now
+from app.modules.tests.attempts.timer import as_utc, remaining_seconds, utc_now
 from app.modules.exams.mock.models import (
     AttemptAnswer,
     AttemptStatus,
@@ -307,7 +307,7 @@ def answer_item(row: AttemptAnswer) -> dict:
         "question_number": row.question_number,
         "answers": ans,
         "answer": ans[0] if ans else "",
-        "updated_at": row.updated_at or row.created_at,
+        "updated_at": as_utc(row.updated_at or row.created_at),
     }
 
 
@@ -316,6 +316,11 @@ def _state_dict(*, attempt_id, test_id, skill, status, started_at, submitted_at,
                 mode, part_number) -> dict:
     remaining = remaining_seconds(expires_at) if status in {"IN_PROGRESS", AttemptStatus.IN_PROGRESS.value} else 0 if expires_at else None
     items = [answer_item(r) for _, r in sorted(rows.items())]
+    # SQLite tz'ni saqlamaydi -> naive datetime JSON'da "Z"siz ketadi va brauzer uni LOKAL vaqt deb
+    # o'qiydi (UTC+5 da timer 5 soatga siljiydi). Shuning uchun doim tz-aware UTC qaytaramiz.
+    started_at, submitted_at, expires_at, last_saved_at = (
+        as_utc(started_at), as_utc(submitted_at), as_utc(expires_at), as_utc(last_saved_at)
+    )
     return {
         "attempt_id": attempt_id, "exam_attempt_id": exam_attempt_id, "mode": mode, "part_number": part_number,
         "test_id": test_id, "skill": skill.value, "status": status, "started_at": started_at,
