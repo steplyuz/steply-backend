@@ -51,6 +51,24 @@ def _questions_for_attempt(spec: SkillSpec, test, attempt: PracticeAttempt) -> l
     return [q for q in questions if q.id in selected_ids]
 
 
+
+# Reading practice vaqti: to'liq test = 60 daqiqa, alohida part (mini-test yoki PART_PRACTICE) = 20 daqiqa.
+READING_FULL_PRACTICE_MINUTES = 60
+READING_PART_PRACTICE_MINUTES = 20
+
+
+def practice_duration_seconds(spec, test, mode: str | None = None, part_number: int | None = None) -> int:
+    """Practice urinishining davomiyligi (soniya). Serverdagi yagona manba."""
+    if spec.skill == SkillType.READING:
+        is_part = (
+            part_number is not None
+            or mode == "PART_PRACTICE"
+            or getattr(test, "practice_part_number", None) is not None
+            or getattr(test, "parent_test_id", None) is not None
+        )
+        return (READING_PART_PRACTICE_MINUTES if is_part else READING_FULL_PRACTICE_MINUTES) * 60
+    return int(getattr(test, "duration_minutes", 0) or 0) * 60
+
 async def _owned_practice(db: AsyncSession, attempt_id: int, user_id: uuid.UUID, skill: SkillType) -> PracticeAttempt:
     a = (await db.execute(
         select(PracticeAttempt).where(PracticeAttempt.id == attempt_id).execution_options(populate_existing=True)
@@ -104,7 +122,7 @@ async def start_practice_attempt(
         existing.active_scope_key = None
         await db.flush()
     now = utc_now()
-    duration_seconds = int(getattr(test, "duration_minutes", 0) or 0) * 60
+    duration_seconds = practice_duration_seconds(spec, test, mode, part_number)
     attempt = PracticeAttempt(
         user_id=user_id, skill=spec.skill, test_id=test_id, mode=mode, part_number=part_number, started_at=now,
         allowed_duration_seconds=duration_seconds or None,
@@ -198,7 +216,7 @@ async def practice_state(db: AsyncSession, spec: SkillSpec, user_id: uuid.UUID, 
     attempt = await _owned_practice(db, attempt_id, user_id, spec.skill)
     test = await spec.load_test(db, attempt.test_id)
     if attempt.expires_at is None and attempt.status == PracticeAttemptStatus.IN_PROGRESS and test is not None:
-        duration_seconds = int(getattr(test, "duration_minutes", 0) or 0) * 60
+        duration_seconds = practice_duration_seconds(spec, test, attempt.mode, attempt.part_number)
         if duration_seconds > 0:
             attempt.allowed_duration_seconds = duration_seconds
             attempt.expires_at = calculate_deadline(attempt.started_at, duration_seconds)
@@ -208,7 +226,7 @@ async def practice_state(db: AsyncSession, spec: SkillSpec, user_id: uuid.UUID, 
         result = await finalize_practice(db, spec, user_id, attempt.id)
         attempt = await _owned_practice(db, attempt_id, user_id, spec.skill)
     saved = await load_answers(db, _Owner(practice_attempt_id=attempt.id))
-    duration = attempt.allowed_duration_seconds or ((getattr(test, "duration_minutes", None) or 0) * 60 if test else None)
+    duration = attempt.allowed_duration_seconds or (practice_duration_seconds(spec, test, attempt.mode, attempt.part_number) if test else None)
     return _state_dict(
         attempt_id=attempt.id, test_id=attempt.test_id, skill=spec.skill,
         status=attempt.status.value, started_at=attempt.started_at, submitted_at=attempt.submitted_at,
@@ -233,7 +251,7 @@ async def submit_practice_with_answers(
     try:
         from app.modules.billing.entitlements import enforce_practice_limit
         now = utc_now()
-        duration_seconds = int(getattr(test, "duration_minutes", 0) or 0) * 60
+        duration_seconds = practice_duration_seconds(spec, test, "FULL_PRACTICE")
         attempt = PracticeAttempt(
             user_id=user_id, skill=spec.skill, test_id=getattr(test, "id"), mode="FULL_PRACTICE", started_at=now,
             allowed_duration_seconds=duration_seconds or None,
