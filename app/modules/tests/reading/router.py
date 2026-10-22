@@ -9,7 +9,7 @@ from sqlalchemy import select
 from typing import List
 
 from app.core.database import get_db
-from app.modules.auth.dependencies import get_current_user, require_role
+from app.modules.auth.dependencies import ensure_force_allowed, get_current_user, require_role
 from app.modules.auth.models import User, UserRole
 
 # Service & Schemas
@@ -266,8 +266,7 @@ async def delete_reading_test(
     user: User = Depends(get_current_user),
 ):
     """Testni o'chirish. Natija bor bo'lsa 409 (faolsizlantiring yoki super admin force=true)."""
-    if force and user.global_role != UserRole.SUPER_ADMIN:
-        raise HTTPException(status_code=403, detail="force=true faqat super admin uchun")
+    ensure_force_allowed(force, user)
     service = ReadingService(db)
     success = await service.delete_test(test_id, force=force)
     if not success:
