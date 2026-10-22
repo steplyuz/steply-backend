@@ -189,7 +189,7 @@ class ReadingService(PaperVersionedExamMixin):
         new_count = 0
         ordered_parts = sorted(source.parts, key=lambda item: item.id or 0)
         part_count = len(ordered_parts)
-        per_part_minutes = max(5, round((source.duration_minutes or 60) / part_count))
+        per_part_minutes = 20  # Reading practice: har bir part 20 daqiqa
 
         for part_number, part in enumerate(ordered_parts, start=1):
             mini = existing.get(part.id)
@@ -236,6 +236,8 @@ class ReadingService(PaperVersionedExamMixin):
                 created.append(mini)
                 new_count += 1
             else:
+                if mini.duration_minutes != per_part_minutes:
+                    mini.duration_minutes = per_part_minutes   # eski mini-testlar ham 20 daqiqaga o'tadi
                 created.append(mini)
 
         await self.db.commit()
