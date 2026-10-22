@@ -5,16 +5,19 @@ import re
 import json
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from app.core.database import get_db
 
-from app.modules.auth.dependencies import get_current_user, require_role
+from app.modules.auth.dependencies import ensure_force_allowed, get_current_user, require_role
+from app.modules.tests.content_access import (
+    authorize_test_content, filter_viewable, resolve_content_viewer,
+)
 from app.modules.auth.models import User, UserRole
 
-from app.modules.tests.writing.models import WritingAnswer, WritingResult
+from app.modules.tests.writing.models import WritingAnswer, WritingExam, WritingResult
 from app.modules.tests.writing.services.pdf_service import PDFService
 from app.modules.tests.writing.services.format_service import WritingFormatService
 from .schemas import (
@@ -239,6 +242,15 @@ async def update_exam(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
     return updated
 
+@admin_router.post("/{exam_id}/unlock", summary="Writing testni lock'dan chiqarish (LOCK OFF)")
+async def unlock_writing_exam(
+    exam_id: str,
+    service: WritingService = Depends(get_writing_service),
+):
+    """Lock'ni olib tashlaydi. Mock imtihonda yoki ishlanayotgan urinish bo'lsa 409."""
+    return await service.unlock_exam(exam_id)
+
+
 @admin_router.post("/{exam_id}/lock", response_model=LockResultResponse, summary="Writing testni lock qilish")
 async def lock_writing_exam(
     exam_id: str,
@@ -255,9 +267,12 @@ async def lock_writing_exam(
 @admin_router.delete("/{exam_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_exam(
     exam_id: str,
+    force: bool = Query(False, description="Faqat SUPER_ADMIN: natija va urinishlar bilan birga o'chirish"),
+    user: User = Depends(get_current_user),
     service: WritingService = Depends(get_writing_service),
 ):
-    deleted = await service.delete_exam(exam_id)
+    ensure_force_allowed(force, user)
+    deleted = await service.delete_exam(exam_id, force=force)
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
     # 204 => body bo'lmasin
@@ -286,9 +301,22 @@ async def export_writing_paper(
 # ---------------------------
 
 @router.get("", response_model=List[WritingExamRead])
-async def list_writing_exams(service: WritingService = Depends(get_writing_service)):
-    # Public katalog faqat faol testlarni ko'rsatadi; nofaol/draft testlar admin API orqali olinadi.
-    return await service.list_exams(active_only=True)
+async def list_writing_exams(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    service: WritingService = Depends(get_writing_service),
+):
+    # Katalog: faqat faol testlar, va faqat viewer ko'ra oladiganlari (pullik practice -> tarif bo'yicha).
+    exams = await service.list_exams(active_only=True)
+    viewer = await resolve_content_viewer(request, db)
+    ids = [e.id for e in exams]
+    rows = (
+        await db.execute(
+            select(WritingExam).where(WritingExam.id.in_(ids), WritingExam.is_practice.is_(True))
+        )
+    ).scalars().all() if ids else []
+    allowed = {r.id for r in await filter_viewable(db, viewer, rows, "writing")}
+    return [e for e in exams if e.id in allowed]
 
 @router.get("/me/results", response_model=List[WritingResultRead])
 async def get_my_results(
@@ -430,10 +458,18 @@ async def export_result_pdf(
 
 # ---------------------------
 @router.get("/{exam_id}", response_model=WritingExamRead)
-async def get_exam(exam_id: str, service: WritingService = Depends(get_writing_service)):
+async def get_exam(
+    exam_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    service: WritingService = Depends(get_writing_service),
+):
     exam = await service.get_exam(exam_id)
     if not exam:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
+    row = await db.get(WritingExam, exam_id)
+    viewer = await resolve_content_viewer(request, db)
+    await authorize_test_content(db, viewer, row, "writing")
     return exam
 
 # Submit
