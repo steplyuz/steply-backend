@@ -23,10 +23,11 @@ from .models import GlobalPracticeUsageLog, SubscriptionPlan, SubscriptionTier, 
 SKILLS = ("READING", "LISTENING", "WRITING", "SPEAKING")
 PRODUCT_TIMEZONE = ZoneInfo("Asia/Tashkent")
 
-# Qaysi tarif qaysi ko'nikmani ocha oladi. Speaking faqat PRO'da.
+# Qaysi tarif qaysi ko'nikmani ocha oladi. Pulik testlar barcha pulik obunaga kiradi
+# (PLUS va PRO); FREE faqat is_free testlarni ochadi.
 TIER_SKILLS: dict[SubscriptionTier, frozenset[str]] = {
     SubscriptionTier.FREE: frozenset({"READING", "LISTENING", "WRITING"}),
-    SubscriptionTier.PLUS: frozenset({"READING", "LISTENING", "WRITING"}),
+    SubscriptionTier.PLUS: frozenset({"READING", "LISTENING", "WRITING", "SPEAKING"}),
     SubscriptionTier.PRO: frozenset({"READING", "LISTENING", "WRITING", "SPEAKING"}),
 }
 
@@ -319,5 +320,3 @@ async def owns_mock_attempt(db: AsyncSession, user_id, attempt_id: Optional[int]
         )
     ).scalar_one_or_none()
     return row is not None
-
-
