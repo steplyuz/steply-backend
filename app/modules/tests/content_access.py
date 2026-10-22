@@ -34,7 +34,12 @@ from app.modules.billing.models import SubscriptionTier
 from app.modules.exams.auth.dependencies import get_current_exams_session
 
 _STAFF_ROLES = (UserRole.ADMIN, UserRole.SUPER_ADMIN)
-_SKILL_FIELD = {"reading": "reading_id", "listening": "listening_id"}
+_SKILL_FIELD = {
+    "reading": "reading_id",
+    "listening": "listening_id",
+    "writing": "writing_id",
+    "speaking": "speaking_id",
+}
 
 
 @dataclass
@@ -144,6 +149,18 @@ async def authorize_test_content(
         if await has_active_enrollment(db, user.id, exam_id):
             return
     raise not_found
+
+
+async def filter_viewable(db: AsyncSession, viewer: ContentViewer, tests: list, skill: str) -> list:
+    """Ro'yxatdan faqat viewer ko'ra oladigan testlarni qoldiradi (writing/speaking katalogi uchun)."""
+    out = []
+    for test in tests:
+        try:
+            await authorize_test_content(db, viewer, test, skill)
+        except HTTPException:
+            continue
+        out.append(test)
+    return out
 
 
 async def visible_catalog_filter(
