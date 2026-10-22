@@ -1,4 +1,6 @@
-from app.modules.exams.mock.usage import ensure_not_in_mock_exam, ensure_no_results, purge_exam_versions
+from app.modules.exams.mock.usage import (
+    ensure_deletable, purge_exam_versions, purge_practice_attempts, purge_results,
+)
 import logging
 from app.modules.tests.scoring_policy import scale_listening_reading
 from typing import List, Optional, Tuple
@@ -50,6 +52,9 @@ class ReadingService(PaperVersionedExamMixin):
     _QUESTION_MODEL = ReadingQuestion
     _PART_MODEL = ReadingPart
     _PART_EXAM_FK = "test_id"
+    USAGE_SKILL = "reading"
+    RESULT_MODEL = ReadingResult
+    RESULT_COL = ReadingResult.test_id
 
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -330,12 +335,18 @@ class ReadingService(PaperVersionedExamMixin):
         await self.db.commit()
         return await self.get_test_by_id(test_id)
 
-    async def delete_test(self, test_id: str) -> bool:
+    async def delete_test(self, test_id: str, force: bool = False) -> bool:
+        """Testni o'chirish. Natija/urinish bo'lsa 409; force=True (faqat super admin) bilan hammasi o'chadi."""
         test = await self.db.get(ReadingTest, test_id)
-        if not test: return False
-        await ensure_not_in_mock_exam(self.db, "reading", test_id)
-        await ensure_no_results(self.db, ReadingResult, ReadingResult.test_id, test_id)
-        await purge_exam_versions(self.db, PaperModule.READING, test_id)
+        if not test:
+            return False
+        await ensure_deletable(
+            self.db, skill=self.USAGE_SKILL, module=self.PAPER_MODULE, test_id=test_id,
+            result_model=self.RESULT_MODEL, result_col=self.RESULT_COL, force=force,
+        )
+        await purge_results(self.db, self.RESULT_MODEL, self.RESULT_COL, test_id)
+        await purge_practice_attempts(self.db, self.USAGE_SKILL, test_id)
+        await purge_exam_versions(self.db, self.PAPER_MODULE, test_id)
         await self.db.delete(test)
         await self.db.commit()
         return True
