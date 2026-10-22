@@ -43,6 +43,11 @@ class PaperVersionedExamMixin:
     _PART_MODEL: Any = None
     _PART_EXAM_FK: str = "exam_id"
 
+    # Test o'chirish/tahrirlash bog'liqligi (mock/usage.py) uchun — subclass to'ldiradi
+    USAGE_SKILL: str = ""          # "reading" | "listening"
+    RESULT_MODEL: Any = None         # ReadingResult / ListeningResult
+    RESULT_COL: Any = None           # ReadingResult.test_id / ListeningResult.exam_id
+
     # --- pastki sinf amalga oshiradi ---
     async def _load_exam_or_404(self, exam_id: str):
         raise NotImplementedError
@@ -86,6 +91,29 @@ class PaperVersionedExamMixin:
 
     async def list_versions(self, exam_id: str):
         return await self._paper_service(exam_id).list_versions()
+
+    async def create_new_version(self, exam_id: str):
+        """Lock qilingan testni tahrirlash uchun yangi DRAFT versiya ochadi.
+
+        Eski lock versiyasi tarix sifatida qoladi (qog'oz/OMR va natijalar unga bog'liq).
+        Draft allaqachon bo'lsa — o'sha draft qaytariladi (idempotent).
+        """
+        from app.modules.exams.mock.usage import ensure_editable
+
+        await self._load_exam_or_404(exam_id)
+        paper = self._paper_service(exam_id)
+        latest = await paper.get_answer_key()
+        if latest is not None and not latest.is_locked:
+            return latest
+        await ensure_editable(
+            self.db, skill=self.USAGE_SKILL, module=self.PAPER_MODULE, test_id=exam_id,
+            result_model=self.RESULT_MODEL, result_col=self.RESULT_COL,
+        )
+        questions = await self._question_dicts_for_paper(exam_id)
+        version = await paper.sync_draft(questions)
+        await self.db.commit()
+        await self.db.refresh(version)
+        return version
 
     async def get_locked_version(self, exam_id: str):
         version = await self._paper_service(exam_id).get_answer_key(version_number=None)
