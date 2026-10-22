@@ -13,7 +13,10 @@ import uuid
 
 # Mock Models (Integratsiya uchun)
 from app.modules.exams.mock.models import MockSkillAttempt, SkillType
-from app.modules.exams.mock.usage import ensure_not_in_mock_exam, ensure_no_results, purge_exam_versions
+from app.modules.exams.mock.usage import (
+    ensure_deletable, ensure_not_in_mock_exam, ensure_no_results,
+    purge_exam_versions, purge_practice_attempts, purge_results,
+)
 
 from .models import (
     ListeningTest, 
@@ -500,12 +503,17 @@ class ListeningService(PaperVersionedExamMixin):
         await self.db.commit()
         return await self.get_exam_by_id(exam_id)
 
-    async def delete_exam(self, exam_id: str):
+    async def delete_exam(self, exam_id: str, force: bool = False):
         exam = await self.db.get(ListeningTest, exam_id)
         if not exam:
             return False
-        await ensure_not_in_mock_exam(self.db, "listening", exam_id)
-        await ensure_no_results(self.db, ListeningResult, ListeningResult.exam_id, exam_id)
+        # Yagona qoida (exams/mock/usage.py): mock/OMR -> doim 409; natija/urinish -> faqat force (SUPER_ADMIN).
+        await ensure_deletable(
+            self.db, skill="listening", module=PaperModule.LISTENING, test_id=exam_id,
+            result_model=ListeningResult, result_col=ListeningResult.exam_id, force=force,
+        )
+        await purge_results(self.db, ListeningResult, ListeningResult.exam_id, exam_id)
+        await purge_practice_attempts(self.db, "listening", exam_id)
         await purge_exam_versions(self.db, PaperModule.LISTENING, exam_id)
         await self.db.delete(exam)
         await self.db.commit()
