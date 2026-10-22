@@ -146,9 +146,12 @@ async def admin_user_detail(user_id: uuid.UUID, db: AsyncSession = Depends(get_d
 
 
 @router.patch("/users/{user_id}", response_model=AdminUserSummary)
-async def admin_update_user(user_id: uuid.UUID, data: AdminUserUpdate, db: AsyncSession = Depends(get_db), _: User = _admin_dep):
+async def admin_update_user(user_id: uuid.UUID, data: AdminUserUpdate, db: AsyncSession = Depends(get_db), actor: User = _admin_dep):
     u=(await db.execute(select(User).options(selectinload(User.profile)).where(User.id==user_id))).scalar_one_or_none()
     if not u: raise HTTPException(404,"Foydalanuvchi topilmadi")
+    # Oddiy ADMIN SUPER_ADMIN hisobini deaktiv qila yoki rolini o'zgartira olmaydi.
+    if u.global_role == UserRole.SUPER_ADMIN and actor.global_role != UserRole.SUPER_ADMIN:
+        raise HTTPException(403, "SUPER_ADMIN hisobini faqat super admin o'zgartira oladi")
     update_data = data.model_dump(exclude_unset=True)
     # SUPER_ADMIN darajasi shu yerdan berilmasligi kerak: bu rol FastAdmin
     # panelga (barcha 65+ jadvalga cheklovsiz CRUD) kirish huquqi beradi, va
