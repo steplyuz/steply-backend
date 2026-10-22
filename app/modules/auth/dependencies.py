@@ -167,3 +167,12 @@ def require_role(*allowed_roles: UserRole):
         return current_user
 
     return _checker
+
+
+def ensure_force_allowed(force: bool, user: User) -> None:
+    """force=true (natija/urinishlar bilan birga majburiy o'chirish) faqat SUPER_ADMIN uchun."""
+    if force and user.global_role != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="force=true faqat super admin uchun",
+        )
