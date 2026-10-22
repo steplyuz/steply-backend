@@ -14,7 +14,10 @@ from app.core.errors import AppError
 from app.core.database import get_db
 from app.core.file_storage import PRIVATE_ROOT as _PRIVATE_ROOT, ensure_private_file
 from fastapi.responses import FileResponse
-from app.modules.auth.dependencies import get_current_user, require_role
+from app.modules.auth.dependencies import ensure_force_allowed, get_current_user, require_role
+from app.modules.tests.content_access import (
+    authorize_test_content, filter_viewable, resolve_content_viewer,
+)
 from app.modules.auth.models import User, UserRole
 from app.modules.tests.speaking.schemas import (
     SpeakingResultCreate,
@@ -186,6 +189,15 @@ async def update_speaking_test(
     return await service.update_test(test_id, data)
 
 
+@admin_router.post("/{test_id}/unlock", summary="Speaking testni lock'dan chiqarish (LOCK OFF)")
+async def unlock_speaking_test(
+    test_id: str,
+    service: SpeakingService = Depends(get_service),
+):
+    """Lock'ni olib tashlaydi. Mock imtihonda yoki ishlanayotgan urinish bo'lsa 409."""
+    return await service.unlock_test(test_id)
+
+
 @admin_router.post("/{test_id}/lock", response_model=LockResultResponse, summary="Speaking testni lock qilish")
 async def lock_speaking_test(
     test_id: str,
@@ -202,10 +214,13 @@ async def lock_speaking_test(
 @admin_router.delete("/{test_id}")
 async def delete_speaking_test(
     test_id: str,
+    force: bool = Query(False, description="Faqat SUPER_ADMIN: yozuvlar va audio fayllar bilan birga o'chirish"),
+    user: User = Depends(get_current_user),
     service: SpeakingService = Depends(get_service),
 ):
-    """Admin: speaking testni o'chirish. Ishlatilgan testni o'chirib bo'lmaydi (409) — is_active=false qiling."""
-    await service.delete_test(test_id)
+    """Speaking testni o'chirish. Yozuv/urinish bo'lsa 409; force=true faqat super admin uchun."""
+    ensure_force_allowed(force, user)
+    await service.delete_test(test_id, force=force)
     return {"detail": "Speaking test o'chirildi"}
 
 
@@ -214,22 +229,30 @@ async def delete_speaking_test(
 # =====================================================================
 @router.get("/practice", response_model=List[SpeakingTestListItem])
 async def list_practice_speaking_tests(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
     service: SpeakingService = Depends(get_service),
 ):
-    """Public catalog: candidate can choose an active Speaking test for practice."""
+    """Katalog: faol practice testlar, faqat viewer ko'ra oladiganlari (pullik -> PRO)."""
     tests = await service.list_tests()
-    return [test for test in tests if test.is_active and test.is_practice]
+    candidates = [test for test in tests if test.is_active and test.is_practice]
+    viewer = await resolve_content_viewer(request, db)
+    return await filter_viewable(db, viewer, candidates, "speaking")
 
 
 @router.get("/practice/{test_id}", response_model=SpeakingTestResponse)
 async def get_practice_speaking_test(
     test_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
     service: SpeakingService = Depends(get_service),
 ):
-    """Public detail for an active practice Speaking test."""
+    """Practice Speaking testi detali — tarif bo'yicha ruxsat tekshiriladi."""
     test = await service.get_test(test_id)
     if not test.is_active or not test.is_practice:
         raise HTTPException(404, "Speaking testi topilmadi")
+    viewer = await resolve_content_viewer(request, db)
+    await authorize_test_content(db, viewer, test, "speaking")
     return test
 
 
@@ -295,9 +318,14 @@ async def submit_practice_speaking(
 @router.get("/practice/{test_id}/paper.pdf", summary="Speaking test savollarini PDF yuklab olish")
 async def download_speaking_question_paper(
     test_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
     service: SpeakingService = Depends(get_service),
 ):
     from fastapi.responses import Response
+    test = await service.get_test(test_id)
+    viewer = await resolve_content_viewer(request, db)
+    await authorize_test_content(db, viewer, test, "speaking")
     pdf_bytes = await service.generate_question_paper_pdf(test_id)
     return Response(
         content=pdf_bytes,
