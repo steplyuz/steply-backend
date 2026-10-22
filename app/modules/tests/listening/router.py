@@ -5,7 +5,7 @@ from sqlalchemy import select
 from typing import List
 
 from app.core.database import get_db
-from app.modules.auth.dependencies import get_current_user, require_role
+from app.modules.auth.dependencies import ensure_force_allowed, get_current_user, require_role
 from app.modules.auth.models import User, UserRole
 
 # Servis va Sxemalar
@@ -213,11 +213,14 @@ async def update_listening_exam(
 @admin_router.delete("/{exam_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_listening_exam(
     exam_id: str,
-    db: AsyncSession = Depends(get_db)
+    force: bool = Query(False, description="Faqat SUPER_ADMIN: natija va urinishlar bilan birga o'chirish"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
-    """Imtihonni o'chirish"""
+    """Imtihonni o'chirish. Natija/urinish bo'lsa 409; force=true faqat super admin uchun."""
+    ensure_force_allowed(force, user)
     service = ListeningService(db)
-    success = await service.delete_exam(exam_id)
+    success = await service.delete_exam(exam_id, force=force)
     if not success:
         raise HTTPException(404, detail="Imtihon topilmadi")
 
