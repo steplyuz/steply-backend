@@ -1,4 +1,7 @@
-from app.modules.exams.mock.usage import ensure_not_in_mock_exam, purge_exam_versions
+from app.modules.exams.mock.usage import (
+    ensure_deletable, ensure_not_in_mock_exam, purge_exam_versions,
+    purge_practice_attempts, purge_results,
+)
 import logging
 import secrets
 from typing import List
@@ -293,14 +296,16 @@ class WritingAdminService:
     # DELETE
     # ==========================================================
 
-    async def delete_exam(self, exam_id: str):
-
-        if await self._has_results(exam_id):
-            raise HTTPException(
-                409,
-                "Bu testda topshirilgan natijalar bor, o'chirib bo'lmaydi. Uni faolsizlantiring (is_active=false).",
-            )
-        await ensure_not_in_mock_exam(self.db, "writing", exam_id)
+    async def delete_exam(self, exam_id: str, force: bool = False):
+        # Qoida Reading/Listening/Speaking bilan bir xil (exams/mock/usage.py):
+        # mock imtihon / OMR -> doim 409; natija yoki urinish -> 409, faqat force (SUPER_ADMIN) bilan o'chadi.
+        await self._get_exam_or_404(exam_id)
+        await ensure_deletable(
+            self.db, skill="writing", module=PaperModule.WRITING, test_id=exam_id,
+            result_model=WritingResult, result_col=WritingResult.exam_id, force=force,
+        )
+        await purge_results(self.db, WritingResult, WritingResult.exam_id, exam_id)
+        await purge_practice_attempts(self.db, "writing", exam_id)
         await purge_exam_versions(self.db, PaperModule.WRITING, exam_id)
 
         exam = await self._get_exam_or_404(exam_id)
@@ -314,6 +319,13 @@ class WritingAdminService:
     # ==========================================================
     # LOCK
     # ==========================================================
+
+    async def unlock_exam(self, exam_id: str):
+        """LOCK OFF — testni yana tahrirlashga ochadi (mock/ishlanayotgan urinish bo'lmasa)."""
+        await self._get_exam_or_404(exam_id)
+        await ContentLockService(self.db, PaperModule.WRITING, exam_id).unlock("writing")
+        await self.db.commit()
+        return {"status": "unlocked"}
 
     async def lock_exam(self, exam_id: str, locked_by_user_id=None):
         """Kontent tuzilmasini tekshiradi va muzlatadi. To'liq test: Part 1 va Part 2 majburiy;
