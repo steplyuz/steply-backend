@@ -162,6 +162,23 @@ def _chunk_path(entry: str) -> str:
     return entry.lstrip("/")
 
 
+def _remove_private_files(paths: list[str]) -> None:
+    """Faqat PRIVATE_ROOT ichidagi mavjud fayllarni o'chiradi (path traversal'dan himoya)."""
+    from app.core.file_storage import PRIVATE_ROOT
+
+    root = PRIVATE_ROOT.resolve()
+    for raw in paths:
+        try:
+            candidate = Path(raw).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if root in candidate.parents and candidate.is_file():
+            try:
+                candidate.unlink()
+            except OSError:
+                logger.warning("Speaking audio faylini o'chirib bo'lmadi: %s", candidate)
+
+
 def _private_audio_url(submission_id: int) -> str:
     return f"/speaking-tests/submissions/{submission_id}/audio"
 
@@ -361,6 +378,13 @@ class SpeakingService:
         await self.db.commit()
         return await self.get_test(test_id)
 
+    async def unlock_test(self, test_id: str):
+        """LOCK OFF — testni qayta tahrirlashga ochadi (mock/ishlanayotgan urinish bo'lmasa)."""
+        await self.get_test(test_id)
+        await ContentLockService(self.db, PaperModule.SPEAKING, test_id).unlock("speaking")
+        await self.db.commit()
+        return {"status": "unlocked"}
+
     async def lock_test(self, test_id: str, locked_by_user_id=None):
         """To'liq test: 4 qism ham to'ldirilgan bo'lishi shart; practice/part-only: kamida bitta qism."""
         test = await self.get_test(test_id)
@@ -382,21 +406,70 @@ class SpeakingService:
             await self.db.commit()
         return version, errors
 
-    async def delete_test(self, test_id: str) -> None:
+    async def delete_test(self, test_id: str, force: bool = False) -> None:
+        """Speaking testni o'chirish (qoida: exams/mock/usage.py bilan bir xil).
+
+        * mock imtihon urinishida ishlatilgan              -> HAR DOIM 409
+        * yozuv, draft yoki practice urinish bor            -> 409; faqat force (SUPER_ADMIN) bilan
+        force=True: yozuvlar DB'dan, audio fayllar diskdan o'chadi (commit'dan keyin).
+        """
+        from sqlalchemy import delete as sa_delete
+        from sqlalchemy import exists as sa_exists
+        from app.modules.exams.mock.models import MockSkillAttempt
+        from app.modules.exams.mock.usage import (
+            ensure_deletable, ensure_not_in_mock_exam, purge_exam_versions, purge_practice_attempts,
+        )
+
         test = await self.db.get(SpeakingTest, test_id)
         if not test:
             raise HTTPException(404, "Speaking test topilmadi")
-        if await self._is_referenced(test_id):
+        mock_used = (await self.db.execute(
+            select(sa_exists().where(MockSkillAttempt.speaking_test_id == test_id))
+        )).scalar()
+        if mock_used:
+            raise HTTPException(409, "Bu test mock imtihon urinishida ishlatilgan, o'chirib bo'lmaydi.")
+        await ensure_not_in_mock_exam(self.db, "speaking", test_id)
+
+        has_recordings = await self._has_recordings(test_id)
+        if has_recordings and not force:
             raise HTTPException(
                 409,
-                "Bu test ishlatilgan (yozuv yoki imtihon urinishi bor), o'chirib bo'lmaydi. "
-                "Uni faolsizlantiring: PUT {\"is_active\": false}.",
+                "Bu testga audio yozuvlar bog'langan, o'chirib bo'lmaydi. Uni faolsizlantiring: "
+                "PUT {is_active: false}. Super admin bo'lsangiz force=true bilan majburiy o'chiring.",
             )
-        from app.modules.exams.mock.usage import ensure_not_in_mock_exam, purge_exam_versions
-        await ensure_not_in_mock_exam(self.db, "speaking", test_id)
+        await ensure_deletable(
+            self.db, skill="speaking", module=PaperModule.SPEAKING, test_id=test_id, force=force,
+        )
+
+        media = await self._collect_media_paths(test_id) if has_recordings else []
+        await self.db.execute(sa_delete(SpeakingRecordingDraft).where(SpeakingRecordingDraft.speaking_test_id == test_id))
+        await self.db.execute(sa_delete(SpeakingSubmission).where(SpeakingSubmission.speaking_test_id == test_id))
+        await purge_practice_attempts(self.db, "speaking", test_id)
         await purge_exam_versions(self.db, PaperModule.SPEAKING, test_id)
         await self.db.delete(test)
         await self.db.commit()
+        _remove_private_files(media)
+
+    async def _collect_media_paths(self, test_id: str) -> list[str]:
+        """O'chiriladigan testning barcha audio fayl yo'llari (submission + draft chunk)."""
+        from app.core.file_storage import private_path
+
+        paths: list[str] = []
+        keys = (await self.db.execute(
+            select(SpeakingSubmission.audio_storage_key).where(
+                SpeakingSubmission.speaking_test_id == test_id,
+                SpeakingSubmission.audio_storage_key.is_not(None),
+            )
+        )).scalars().all()
+        for key in keys:
+            paths.append(str(private_path("speaking", "submissions", key)))
+        chunk_lists = (await self.db.execute(
+            select(SpeakingRecordingDraft.chunk_urls).where(SpeakingRecordingDraft.speaking_test_id == test_id)
+        )).scalars().all()
+        for chunks in chunk_lists:
+            for entry in chunks or []:
+                paths.append(_chunk_path(str(entry)))
+        return paths
 
     # ------------------------------------------------------------------
     # FOYDALANUVCHI: imtihonda tayinlangan (tasodifiy tanlangan) testni olish
