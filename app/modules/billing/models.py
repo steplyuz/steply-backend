@@ -28,7 +28,7 @@ class SubscriptionTier(str, Enum):
     """Free/Plus/Pro — platformaning uchta foydalanish darajasi.
 
     PLUS: Reading, Listening, Writing; Writing'ni AI (OpenAI) tekshiradi.
-    PRO: barcha 4 ko'nikma (Speaking faqat shu yerda); Writing/Speaking'ni teacher tekshiradi, AI yo'q.
+    PRO: barcha 4 ko'nikma (Speaking PLUS'da ham bor); Writing/Speaking'ni teacher tekshiradi, AI yo'q.
 
     FREE hech qanday `UserSubscription` talab qilmaydi — bu faol
     (is_active + start_date <= now < end_date) obunasi bo'lmagan HAR BIR foydalanuvchi
@@ -56,7 +56,7 @@ class SubscriptionPlan(Base):
     ai_limit: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     exam_limit: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # Tarifga xos imkoniyatlar; FREE/PLUS/PRO faqat legacy/default daraja sifatida qoladi.
-    included_skills: Mapped[list] = mapped_column(JSON, default=lambda: ["READING", "LISTENING", "WRITING"], nullable=False)
+    included_skills: Mapped[list] = mapped_column(JSON, default=lambda: ["READING", "LISTENING", "WRITING", "SPEAKING"], nullable=False)
     ai_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     discount_percent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
