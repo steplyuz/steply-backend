@@ -77,6 +77,16 @@ class ResetPasswordRequest(BaseModel):
 
     _normalize_phone = field_validator("phone")(_phone_validator)
 
+class SetPasswordRequest(BaseModel):
+    """Google/Telegram orqali kirgan (parolsiz) foydalanuvchi uchun birinchi parol."""
+    new_password: str = Field(min_length=PASSWORD_MIN, max_length=PASSWORD_MAX)
+
+class LinkedAccountsResponse(BaseModel):
+    has_password: bool
+    has_phone: bool
+    telegram_linked: bool
+    google_linked: bool
+
 class PasswordChangeRequest(BaseModel):
     current_password: str = Field(min_length=1, max_length=PASSWORD_MAX)
     new_password: str = Field(min_length=PASSWORD_MIN, max_length=PASSWORD_MAX)

@@ -24,6 +24,7 @@ from .schemas import (
     WritingExamCreate,
     WritingExamRead,
     WritingExamUpdate,
+    WritingTaskCreate,
     WritingSubmitRequest,
     WritingResultRead,
     WritingGradeRequest,
@@ -241,6 +242,34 @@ async def update_exam(
     if not updated:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Exam not found")
     return updated
+
+@admin_router.put(
+    "/{exam_id}/tasks/{task_id}",
+    response_model=WritingExamRead,
+    summary="Writing topshirig'ini alohida tahrirlash (topshiriq id bo'yicha)",
+)
+async def update_writing_task(
+    exam_id: str,
+    task_id: int,
+    data: WritingTaskCreate,
+    service: WritingService = Depends(get_writing_service),
+):
+    return await service.admin_service.upsert_task(exam_id, task_id, data)
+
+
+@admin_router.post(
+    "/{exam_id}/tasks",
+    response_model=WritingExamRead,
+    status_code=201,
+    summary="Writing imtihoniga yangi topshiriq qo'shish",
+)
+async def add_writing_task(
+    exam_id: str,
+    data: WritingTaskCreate,
+    service: WritingService = Depends(get_writing_service),
+):
+    return await service.admin_service.add_task(exam_id, data)
+
 
 @admin_router.post("/{exam_id}/unlock", summary="Writing testni lock'dan chiqarish (LOCK OFF)")
 async def unlock_writing_exam(

@@ -108,7 +108,7 @@ def _group_intro(qtype: str, qs: list, st: dict) -> list:
     return [Paragraph(_esc(text), st["instr"])]
 
 
-def _question_flow(q: dict, qtype: str, st: dict) -> list:
+def _question_flow(q: dict, qtype: str, st: dict, show_options: bool = True) -> list:
     n = q.get("question_number")
     text = (q.get("text") or "").strip()
     if qtype in GAP_TYPES:
@@ -123,7 +123,7 @@ def _question_flow(q: dict, qtype: str, st: dict) -> list:
     if qtype == "TRUE_FALSE_NOT_GIVEN":
         inline = "    ".join(f"{_esc(o.get('label'))}) {_esc(o.get('value'))}" for o in options)
         return [KeepTogether([head, Paragraph(inline, st["opt"])])]
-    return [KeepTogether([head] + _option_lines(options, st))]
+    return [KeepTogether([head] + (_option_lines(options, st) if show_options else []))]
 
 
 def _is_inline_gap(q: dict, passage: str) -> bool:
@@ -144,8 +144,13 @@ def _grouped_questions_flow(questions: list, passage: str, st: dict) -> list:
     flow: list = []
     for t, qs in groups:
         flow += _group_intro(t, qs, st)
+        # Bir guruhdagi ko'p tanlovli savollar bir xil variantga ega bo'lsa (umumiy variantlar banki),
+        # variantlarni bir marta chiqaramiz — har savol ostida takrorlamaymiz.
+        shared = _same_options(qs) if t == "MULTIPLE_CHOICE" and len(qs) > 1 else None
+        if shared:
+            flow.append(_options_box(shared, "", st))
         for q in qs:
-            flow += _question_flow(q, t, st)
+            flow += _question_flow(q, t, st, show_options=not shared)
     return flow
 
 

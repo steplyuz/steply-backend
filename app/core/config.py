@@ -11,7 +11,6 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./mock_center.db"
 
     SECRET_KEY: str = "CHANGE_ME_IN_ENV"
-    ALGORITHM: str = "HS256"
     AUTO_CREATE_SCHEMA: bool = True
     # Default faqat lokal host. Production'da aniq ro'yxat talab qilinadi (validator).
     TRUSTED_HOSTS: Any = ["localhost", "127.0.0.1", "testserver"]
@@ -24,23 +23,20 @@ class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_BOT_USERNAME: str = "steply_bot"
     TELEGRAM_BILLING_ADMIN_CHAT_ID: str = ""
-    TELEGRAM_BILLING_ADMIN_USER_ID: str = ""
     TELEGRAM_BILLING_ADMIN_TELEGRAM_USER_ID: str = ""
 
     # Telegram Login OIDC (Authorization Code + PKCE)
     TELEGRAM_CLIENT_ID: str = ""
     TELEGRAM_CLIENT_SECRET: str = ""
     TELEGRAM_REDIRECT_URI: str = ""
-    TELEGRAM_OIDC_DISCOVERY_URL: str = "https://oauth.telegram.org/.well-known/openid-configuration"
     TELEGRAM_OIDC_STATE_TTL_SECONDS: int = 600
     TELEGRAM_OIDC_HTTP_TIMEOUT_SECONDS: float = 10.0
     TELEGRAM_OIDC_CLOCK_SKEW_SECONDS: int = 60
-    TELEGRAM_OIDC_SCOPE: str = "openid profile phone"
 
     # Google Sign-In (Google Identity Services, id_token JS orqali keladi; redirect yo'q)
     GOOGLE_CLIENT_ID: str = ""
-    GOOGLE_JWKS_URL: str = "https://www.googleapis.com/oauth2/v3/certs"
     GOOGLE_HTTP_TIMEOUT_SECONDS: float = 10.0
+    SMS_ENABLED: bool = False
     ESKIZ_EMAIL: str = ""
     ESKIZ_PASSWORD: str = ""
     INTERNAL_API_TOKEN: str = ""
@@ -48,6 +44,34 @@ class Settings(BaseSettings):
     # OpenAI-compatible providers (for example Amazon Bedrock Mantle). Empty = OpenAI default.
     OPENAI_BASE_URL: str = ""
     OPENAI_MODEL: str = "gpt-4o-mini"
+    # Speaking AI baholash
+    SPEAKING_AI_ENABLED: bool = False
+    STT_BASE_URL: str = ""
+    # Transkripsiya uchun alohida kalit (masalan OpenAI). Bo'sh bo'lsa OPENAI_API_KEY ishlatiladi.
+    STT_API_KEY: str = ""
+    # STT provayderi: "openai" (OpenAI-mos API) yoki "aws" (Amazon Transcribe, S3 orqali)
+    # "local": faster-whisper (serverda, API va kalitsiz). Birinchi ishga tushirishda model yuklanadi.
+    STT_PROVIDER: str = "openai"
+    WHISPER_MODEL_SIZE: str = "base"
+    WHISPER_DEVICE: str = "cpu"
+    WHISPER_COMPUTE_TYPE: str = "int8"
+    AWS_REGION: str = "us-east-1"
+    # Bo'sh bo'lsa boto3 standart zanjiri (IAM role, ~/.aws) ishlatiladi
+    AWS_ACCESS_KEY_ID: str = ""
+    AWS_SECRET_ACCESS_KEY: str = ""
+    # STT_PROVIDER=aws bo'lsa: audio vaqtincha yoziladigan S3 bucket
+    AWS_TRANSCRIBE_BUCKET: str = ""
+    AWS_TRANSCRIBE_LANGUAGE: str = "en-US"
+    STT_MODEL: str = "whisper-1"
+    SPEAKING_AI_MODEL: str = ""
+    # inPAY (avtomatik to'lov). INPAY_ENABLED=False bo'lsa buyurtmalar admin chek tekshiruvi orqali ishlaydi.
+    INPAY_ENABLED: bool = False
+    INPAY_API_BASE: str = "https://inpay.uz/api/v2"
+    INPAY_SECRET_KEY: str = ""          # sk_live_... / sk_test_...
+    INPAY_WEBHOOK_SECRET: str = ""      # whsec_... (kassa webhook imzo siri)
+    INPAY_WEBHOOK_URL: str = ""         # ommaviy https manzil: .../api/v1/billing/inpay/webhook
+    INPAY_RETURN_URL: str = ""          # frontend: https://.../dashboard/billing (?order=... qo'shiladi)
+    INPAY_WEBHOOK_TOLERANCE_SECONDS: int = 300
 
     # MUHIM: pydantic-settings v2 da List[str] bo'lsa, .env'dan o'qiyotganda
     # avvalo JSON sifatida parse qilmoqchi bo'ladi va vergul-ajratilgan
@@ -67,13 +91,11 @@ class Settings(BaseSettings):
     # Lokal http://localhost muhitida buzilmasligi uchun default False — production'da
     # .env orqali COOKIE_SECURE=true qilib qo'yish SHART.
     COOKIE_SECURE: bool = False
-    COOKIE_HTTPONLY: bool = True
     # api.steply.uz, exams.steply.uz and the web apps are same-site. Lax is
     # the safer default; set "none" only for a genuinely cross-site frontend.
     COOKIE_SAMESITE: str = "lax"
     DEBUG: bool = False
 
-    SPEAKING_AUDIO_DIR: str = "storage/private/speaking"
     # Ochiq static emas: audio ruxsat tekshiruvi orqali beriladi (/exams/listening-audio/{file}).
     LISTENING_AUDIO_DIR: str = "storage/private/listening_audio"
     PRIVATE_STORAGE_DIR: str = "storage/private"
@@ -180,6 +202,14 @@ class Settings(BaseSettings):
             if self.COOKIE_DOMAIN and self.COOKIE_DOMAIN.startswith("http"):
                 raise ValueError("COOKIE_DOMAIN URL emas, faqat cookie domain bo'lishi kerak")
         return self
+
+    @field_validator("EXAMS_LOGIN_OPENS_MINUTES_BEFORE", "EXAMS_LOGIN_CLOSES_MINUTES_AFTER", mode="before")
+    @classmethod
+    def empty_int_to_none(cls, value: Any) -> Any:
+        # .env.example'da bo'sh qoldirilgan "int | None" sozlamalar startupni yiqitmasin.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     @field_validator("ALLOWED_ORIGINS", "SPEAKING_ALLOWED_AUDIO_EXTENSIONS", "TRUSTED_HOSTS", "ADMIN_ALLOWED_IPS", mode="before")
     @classmethod

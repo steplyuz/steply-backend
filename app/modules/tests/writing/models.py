@@ -20,7 +20,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
-from app.core.mixins import ExamFlagsMixin, ExamIdMixin, TimestampMixin
+from app.core.mixins import ExamCommonMixin, ExamFlagsMixin, ExamIdMixin, TimestampMixin
 from app.modules.auth.models import User
 
 
@@ -116,7 +116,7 @@ class WritingCriterionConfig(Base):
 # WRITING EXAM
 # ==========================================================
 
-class WritingExam(Base, ExamIdMixin, ExamFlagsMixin, TimestampMixin):
+class WritingExam(Base, ExamIdMixin, ExamFlagsMixin, ExamCommonMixin, TimestampMixin):
     """SUB-TEST 3: WRITING — 2 qism (informal/formal xat + blogpost/forum
     posti), rasmiy DTM formati. `id` boshqa exam modullari bilan bir xil
     (String(64)) — avval String(30) edi, endi kengaytirildi.
@@ -127,7 +127,6 @@ class WritingExam(Base, ExamIdMixin, ExamFlagsMixin, TimestampMixin):
     year: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
     sequence_number: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    title: Mapped[str] = mapped_column(String(255), nullable=False)
     cefr_level: Mapped[CEFRLevel] = mapped_column(Enum(CEFRLevel, native_enum=False), nullable=False)
 
     duration_minutes: Mapped[int] = mapped_column(
@@ -137,6 +136,7 @@ class WritingExam(Base, ExamIdMixin, ExamFlagsMixin, TimestampMixin):
     __table_args__ = (
         UniqueConstraint("year", "sequence_number", name="uq_writing_year_sequence"),
         Index("ix_exam_year_sequence", "year", "sequence_number"),
+        UniqueConstraint("parent_test_id", "practice_part_number", name="uq_writing_mini_test_part_number"),
     )
 
     tasks: Mapped[List["WritingTask"]] = relationship(

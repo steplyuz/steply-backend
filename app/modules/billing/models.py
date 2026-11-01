@@ -20,7 +20,7 @@ class BillingProductType(str, Enum):
     SPEAKING_PRACTICE = "speaking_practice"
     FULL_SKILLS = "full_skills"  # legacy
     FULL_EXAM = "full_exam"
-    WRITING_AI_CREDITS = "writing_ai_credits"
+    AI_CREDITS = "ai_credits"  # umumiy AI kreditlar (Writing + Speaking)
     TEACHER_REVIEW_CREDITS = "teacher_review_credits"
 
 
@@ -52,11 +52,12 @@ class SubscriptionPlan(Base):
     tier: Mapped[SubscriptionTier] = mapped_column(
         SAEnum(SubscriptionTier, length=7), default=SubscriptionTier.PLUS, nullable=False
     )
-    # PLUS tarifda: bir kalendar oyda AI tekshiriladigan Writing javoblari (topshiriqlar) soni. 0 = AI yo'q.
+    # Umumiy AI kreditlar: bir kalendar oyda Writing (1 javob = 1 kredit) va Speaking (1 baholash = 1 kredit)
+    # uchun BITTA umumiy pool. 0 = AI yo'q.
     ai_limit: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     exam_limit: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # Tarifga xos imkoniyatlar; FREE/PLUS/PRO faqat legacy/default daraja sifatida qoladi.
-    included_skills: Mapped[list] = mapped_column(JSON, default=lambda: ["READING", "LISTENING", "WRITING", "SPEAKING"], nullable=False)
+    included_skills: Mapped[list] = mapped_column(JSON, default=lambda: ["READING", "LISTENING", "WRITING"], nullable=False)
     ai_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     discount_percent: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
@@ -148,9 +149,10 @@ class UserSubscription(Base):
 
 
 
-class WritingAICreditGrant(Base):
-    """Purchased Writing AI credits granted once per approved billing order."""
-    __tablename__ = "writing_ai_credit_grants"
+class AICreditGrant(Base):
+    """Sotib olingan umumiy AI kreditlar (Writing + Speaking), har tasdiqlangan buyurtmaga bir marta.
+    """
+    __tablename__ = "ai_credit_grants"
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True, native_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
     order_id: Mapped[str] = mapped_column(ForeignKey("billing_orders.id", ondelete="CASCADE"), unique=True, nullable=False)
@@ -159,9 +161,9 @@ class WritingAICreditGrant(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
 
     __table_args__ = (
-        Index("ix_writing_ai_credits_user_remaining", "user_id", "credits_remaining"),
-        CheckConstraint("credits_total > 0", name="ck_writing_ai_credits_total_positive"),
-        CheckConstraint("credits_remaining >= 0 AND credits_remaining <= credits_total", name="ck_writing_ai_credits_remaining_range"),
+        Index("ix_ai_credits_user_remaining", "user_id", "credits_remaining"),
+        CheckConstraint("credits_total > 0", name="ck_ai_credits_total_positive"),
+        CheckConstraint("credits_remaining >= 0 AND credits_remaining <= credits_total", name="ck_ai_credits_remaining_range"),
     )
 
 
@@ -181,17 +183,26 @@ class TeacherReviewCreditGrant(Base):
     )
 
 
-class WritingAIUsage(Base):
-    """Per-answer idempotent ledger identifying subscription vs purchased credit usage."""
-    __tablename__ = "writing_ai_usage"
+class AIUsage(Base):
+    """Umumiy AI kredit ledger'i: Writing (javob bo'yicha) va Speaking (job bo'yicha) baholash.
+
+    feature = writing | speaking. billing_source = subscription (oylik obuna limiti) | purchased (sotib olingan kredit).
+    Writing: answer_id to'ldiriladi (bir javob bir marta hisoblanadi). Speaking: job_id to'ldiriladi.
+    purchased_units — sotib olingan kreditdan yechilgan miqdor (xato bo'lsa qaytarish uchun).
+    """
+    __tablename__ = "ai_usage"
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True, native_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False)
-    answer_id: Mapped[int] = mapped_column(ForeignKey("writing_answers.id", ondelete="CASCADE"), unique=True, nullable=False)
-    billing_source: Mapped[str] = mapped_column(String(20), nullable=False)  # subscription | purchased
+    feature: Mapped[str] = mapped_column(String(16), nullable=False)
+    answer_id: Mapped[Optional[int]] = mapped_column(ForeignKey("writing_answers.id", ondelete="CASCADE"), unique=True, nullable=True)
+    job_id: Mapped[Optional[int]] = mapped_column(Integer, unique=True, nullable=True)
+    billing_source: Mapped[str] = mapped_column(String(20), nullable=False)
+    purchased_units: Mapped[int] = mapped_column(Integer, default=0, server_default="0", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     __table_args__ = (
-        Index("ix_writing_ai_usage_user_source_created", "user_id", "billing_source", "created_at"),
-        CheckConstraint("billing_source IN ('subscription', 'purchased')", name="ck_writing_ai_usage_source"),
+        Index("ix_ai_usage_user_source_created", "user_id", "billing_source", "created_at"),
+        CheckConstraint("billing_source IN ('subscription', 'purchased')", name="ck_ai_usage_source"),
+        CheckConstraint("feature IN ('writing', 'speaking')", name="ck_ai_usage_feature"),
     )
 
 
@@ -210,6 +221,10 @@ class BillingOrder(Base):
     status: Mapped[BillingOrderStatus] = mapped_column(SAEnum(BillingOrderStatus), default=BillingOrderStatus.PENDING_PAYMENT, index=True, nullable=False)
     receipt_path: Mapped[Optional[str]] = mapped_column(String(500))
     receipt_storage_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    # inPAY avtomatik to'lov: to'lov ID va xaridor to'laydigan sahifa.
+    payment_provider: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    provider_payment_id: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True, nullable=True)
+    provider_checkout_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     user_note: Mapped[Optional[str]] = mapped_column(String(1000))
     admin_note: Mapped[Optional[str]] = mapped_column(String(1000))
     reviewed_by: Mapped[Optional[uuid.UUID]] = mapped_column(Uuid(as_uuid=True, native_uuid=True), ForeignKey("users.id", ondelete="SET NULL"))
@@ -234,6 +249,10 @@ class PromoCode(Base):
     discount_amount: Mapped[Optional[int]] = mapped_column(Integer)
     max_usage: Mapped[Optional[int]] = mapped_column(Integer)
     used_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # Berilsa: promo shu tarifga bog'lanadi. discount_percent=100 bo'lsa obuna to'lovsiz darhol faollashadi.
+    activates_plan_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("subscription_plans.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     valid_from: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

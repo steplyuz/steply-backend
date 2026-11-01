@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.auth.models import User
 from app.modules.billing.models import (
-    BillingOrder, BillingOrderStatus, BillingProductType, BillingProduct, WritingAICreditGrant, TeacherReviewCreditGrant, SubscriptionPlan, UserSubscription,
+    BillingOrder, BillingOrderStatus, BillingProductType, BillingProduct, AICreditGrant, TeacherReviewCreditGrant, SubscriptionPlan, UserSubscription,
 )
 
 
@@ -18,6 +18,27 @@ async def lock_order(db: AsyncSession, order_id: str) -> BillingOrder:
     if not order:
         raise HTTPException(404, "Buyurtma topilmadi")
     return order
+
+
+async def grant_subscription(db: AsyncSession, user_id, plan: SubscriptionPlan, now: datetime) -> UserSubscription:
+    """Obuna beradi (to'lov yoki promo orqali).
+
+    - Shu tarifdagi faol obuna bo'lsa — muddat uzaytiriladi (navbatga qo'shiladi).
+    - Boshqa tarif bo'lsa — darhol boshlanadi, shunda limitlar va ko'nikmalar qo'shiladi.
+    """
+    same = (await db.execute(select(UserSubscription).where(
+        UserSubscription.user_id == user_id,
+        UserSubscription.plan_id == plan.id,
+        UserSubscription.is_active.is_(True),
+        UserSubscription.end_date > now,
+    ).order_by(UserSubscription.end_date.desc()))).scalars().first()
+    start = same.end_date if same else now
+    sub = UserSubscription(
+        user_id=user_id, plan_id=plan.id, start_date=start,
+        end_date=start + timedelta(days=plan.duration_days), is_active=True,
+    )
+    db.add(sub)
+    return sub
 
 
 async def _claim_for_review(
@@ -68,15 +89,10 @@ async def _grant_entitlement(db: AsyncSession, order: BillingOrder, now: datetim
         plan = await db.get(SubscriptionPlan, int(order.product_id or 0))
         if not plan:
             raise HTTPException(409, "Buyurtmaga bog‘langan tarif topilmadi")
-        current = (await db.execute(select(UserSubscription).where(
-            UserSubscription.user_id == order.user_id, UserSubscription.is_active.is_(True),
-            UserSubscription.end_date > now).order_by(UserSubscription.end_date.desc()))).scalars().first()
-        start = current.end_date if current else now
-        db.add(UserSubscription(user_id=order.user_id, plan_id=plan.id, start_date=start,
-                                end_date=start + timedelta(days=plan.duration_days), is_active=True))
-    elif order.product_type == BillingProductType.WRITING_AI_CREDITS:
+        await grant_subscription(db, order.user_id, plan, now)
+    elif order.product_type == BillingProductType.AI_CREDITS:
         # order_id UNIQUE makes grant idempotent even if a legacy/retried approval path runs twice.
-        existing = (await db.execute(select(WritingAICreditGrant.id).where(WritingAICreditGrant.order_id == order.id))).scalar_one_or_none()
+        existing = (await db.execute(select(AICreditGrant.id).where(AICreditGrant.order_id == order.id))).scalar_one_or_none()
         if existing is None:
             product = await db.get(BillingProduct, int(order.product_id or 0))
             try:
@@ -84,8 +100,8 @@ async def _grant_entitlement(db: AsyncSession, order: BillingOrder, now: datetim
             except ValueError:
                 credits = 0
             if credits < 1:
-                raise HTTPException(409, "Writing AI kredit mahsuloti noto‘g‘ri sozlangan")
-            db.add(WritingAICreditGrant(user_id=order.user_id, order_id=order.id, credits_total=credits, credits_remaining=credits))
+                raise HTTPException(409, "AI kredit mahsuloti noto‘g‘ri sozlangan")
+            db.add(AICreditGrant(user_id=order.user_id, order_id=order.id, credits_total=credits, credits_remaining=credits))
     elif order.product_type == BillingProductType.TEACHER_REVIEW_CREDITS:
         existing = (await db.execute(select(TeacherReviewCreditGrant.id).where(
             TeacherReviewCreditGrant.order_id == order.id

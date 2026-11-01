@@ -328,9 +328,9 @@ class SpeakingResultCreate(BaseModel):
     lexical_resource: Optional[float] = Field(None, ge=0, le=75)
     grammar_accuracy: Optional[float] = Field(None, ge=0, le=75)
     pronunciation: Optional[float] = Field(None, ge=0, le=75)
-    # Gapirish bo'yicha 3 turdagi topshiriqning umumlashgan raw bali (0–36).
-    # Yakuniy ball (0–75) server tomonida jadval bo'yicha hisoblanadi (scoring_policy).
-    overall_raw: float = Field(..., ge=0, le=36)
+    # Gapirish umumlashgan xom bali (0–21, yarim qadam): 1.1 + 1.2 + 2 + 3 qismlar yig'indisi.
+    # Yakuniy ball (0–75) server tomonida rasmiy reyting shkalasi bo'yicha hisoblanadi.
+    overall_raw: float = Field(..., ge=0, le=21)
     # get_cefr_level qaytaradigan qiymatlar to'plami ko'rinmagani uchun
     # Literal qilinmadi; faqat uzunlik cheklangan.
     cefr_level: Optional[str] = Field(None, max_length=32)

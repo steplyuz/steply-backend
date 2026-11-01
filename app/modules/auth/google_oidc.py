@@ -32,6 +32,7 @@ GOOGLE_ISSUERS = ["https://accounts.google.com", "accounts.google.com"]
 STATE_COOKIE = "google_oidc_browser"
 STATE_COOKIE_PATH = "/api/v1/auth/google"
 _FAIL = "Google authentication failed"
+GOOGLE_JWKS_URL = "https://www.googleapis.com/oauth2/v3/certs"
 
 
 class GoogleJWKS:
@@ -44,7 +45,7 @@ class GoogleJWKS:
             return self._keys
         try:
             async with httpx.AsyncClient(timeout=settings.GOOGLE_HTTP_TIMEOUT_SECONDS) as c:
-                r = await c.get(settings.GOOGLE_JWKS_URL)
+                r = await c.get(GOOGLE_JWKS_URL)
                 r.raise_for_status()
                 keys = r.json().get("keys")
         except (httpx.HTTPError, ValueError) as exc:
@@ -79,9 +80,12 @@ class GoogleJWKS:
                 leeway=60,
             )
         except (jwt.PyJWTError, TypeError, ValueError) as exc:
+            # Sabab (masalan InvalidAudienceError: GOOGLE_CLIENT_ID mos emas) tokenni oshkor qilmasdan log'ga yoziladi.
+            logger.warning("Google id_token rejected: %s", type(exc).__name__)
             raise HTTPException(401, _FAIL) from exc
         nonce = claims.get("nonce")
         if not isinstance(nonce, str) or not secrets.compare_digest(nonce, expected_nonce):
+            logger.warning("Google id_token rejected: nonce mismatch")
             raise HTTPException(401, _FAIL)
         if not isinstance(claims.get("sub"), str) or not claims["sub"]:
             raise HTTPException(401, _FAIL)
@@ -164,6 +168,58 @@ class GoogleOIDCService:
         token = await self.auth._create_session_and_tokens(user, request)
         self._clear_cookie(response)
         return token
+
+    async def _consume_link_nonce(self, request: Request, response) -> str:
+        secret = request.cookies.get(STATE_COOKIE)
+        if not secret:
+            self._clear_cookie(response)
+            raise HTTPException(400, _FAIL)
+        tx = (await self.db.execute(select(TelegramOIDCTransaction).where(
+            TelegramOIDCTransaction.browser_secret_hash == _sha256(secret)))).scalar_one_or_none()
+        if tx is None or tx.used_at is not None or tx.expires_at.replace(tzinfo=timezone.utc) <= _now():
+            self._clear_cookie(response)
+            raise HTTPException(400, _FAIL)
+        nonce = _decrypt(tx.nonce_encrypted)
+        consumed = await self.db.execute(update(TelegramOIDCTransaction).where(
+            TelegramOIDCTransaction.id == tx.id, TelegramOIDCTransaction.used_at.is_(None))
+            .values(used_at=_now()).execution_options(synchronize_session=False))
+        if consumed.rowcount != 1:
+            self._clear_cookie(response)
+            raise HTTPException(400, _FAIL)
+        await self.db.commit()
+        return nonce
+
+    async def link(self, *, user: User, request: Request, response, id_token: str) -> User:
+        """Hozir kirgan akkauntga Google'ni bog'laydi. Email bo'yicha birlashtirmaydi."""
+        if not settings.GOOGLE_CLIENT_ID:
+            raise HTTPException(503, "Google authentication is not configured")
+        if not id_token:
+            self._clear_cookie(response)
+            raise HTTPException(400, _FAIL)
+        nonce = await self._consume_link_nonce(request, response)
+        claims = await jwks.validate(id_token, expected_nonce=nonce)
+        self._clear_cookie(response)
+        sub = str(claims["sub"])
+
+        already = (await self.db.execute(select(Identity.provider_user_id).where(
+            Identity.user_id == user.id, Identity.provider == "google"))).scalars().first()
+        if already is not None:
+            if already == sub:
+                return user
+            raise HTTPException(409, "Bu akkauntga boshqa Google allaqachon bog'langan")
+
+        owner = (await self.db.execute(select(Identity.user_id).where(
+            Identity.provider == "google", Identity.provider_user_id == sub))).scalar_one_or_none()
+        if owner is not None:
+            raise HTTPException(409, "Bu Google akkaunti boshqa foydalanuvchiga bog'langan")
+
+        try:
+            async with self.db.begin_nested():
+                self.db.add(Identity(user_id=user.id, provider="google", provider_user_id=sub))
+                await self.db.flush()
+        except IntegrityError as exc:
+            raise HTTPException(409, "Google akkaunti bog'lanmadi, qayta urinib ko'ring") from exc
+        return user
 
     async def _identity_user(self, sub: str) -> User | None:
         ident = (await self.db.execute(select(Identity).where(

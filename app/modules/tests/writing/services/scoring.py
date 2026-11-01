@@ -1,7 +1,7 @@
 """Writing ballari: 2025 ko‘p darajali format.
 
 Topshiriqlar: 1.1 (B1, 0–5), 1.2 (B2, 0–5), 2 (C1, 0–6). Ekspert bahosi yig‘indisi (0–16)
-quyidagi jadval bo‘yicha 0–75 yakuniy ballga aylanadi ("multilevel-2025 ... format tafsilotlari").
+ustoz tasdiqlagan konversiya jadvali bo‘yicha 0–75 yakuniy ballga aylanadi.
 CEFR darajasi yakuniy balldan aniqlanadi (Multilevel-bm: C1 65–75, B2 51–64, B1 38–50).
 """
 import re
@@ -9,11 +9,14 @@ from dataclasses import dataclass
 
 MAX_EXPERT_TOTAL = 16.0
 
+# Konversiya jadvali (Expert mark → Standard score), ustoz tasdiqlagan jadval bo'yicha.
+# Eslatma: topshiriqlar maksimumi 5+5+6=16, shuning uchun 16 dan yuqori qiymat (17) faqat jadval
+# to'liqligi uchun; yig'indi 16 ga cheklanadi (expert_to_scaled).
 EXPERT_TO_SCALED = {
-    16: 75, 15.5: 72, 15: 69, 14.5: 67, 14: 65, 13.5: 64, 13: 63, 12.5: 62, 12: 61,
-    11.5: 59, 11: 57, 10.5: 55, 10: 53, 9.5: 51, 9: 50, 8.5: 48, 8: 47, 7.5: 45,
-    7: 43, 6.5: 41, 6: 40, 5.5: 38, 5: 37, 4.5: 35, 4: 33, 3.5: 31, 3: 28, 2.5: 25,
-    2: 21, 1.5: 17, 1: 14, 0.5: 10, 0: 0,
+    17: 75, 16.5: 74, 16: 72, 15.5: 69, 15: 67, 14.5: 65, 14: 63, 13.5: 62, 13: 61,
+    12.5: 59, 12: 57, 11.5: 56, 11: 54, 10.5: 53, 10: 51, 9.5: 50, 9: 49, 8.5: 47,
+    8: 45, 7.5: 43, 7: 42, 6.5: 40, 6: 38, 5.5: 35, 5: 32, 4.5: 29, 4: 26, 3.5: 23,
+    3: 21, 2.5: 18, 2: 15, 1.5: 13, 1: 11, 0.5: 10, 0: 0,
 }
 
 _WORD_RE = re.compile(r"\b[\w’‘ʻʼ'-]+\b", re.UNICODE)

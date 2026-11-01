@@ -42,12 +42,12 @@ from app.modules.tests.speaking.speaking_config import (
     SPEAKING_TIMINGS,
 )
 from app.core.clock import utcnow
-from app.modules.tests.scoring_policy import writing_speaking_final
+from app.modules.tests.scoring_policy import speaking_final
 
 logger = logging.getLogger(__name__)
 
 # Audio qayerga saqlanishi app/core/config.py (Settings) orqali boshqariladi:
-#   SPEAKING_AUDIO_DIR / PUBLIC_BASE_URL / SPEAKING_ALLOWED_AUDIO_EXTENSIONS / SPEAKING_MAX_AUDIO_MB
+#   PUBLIC_BASE_URL / SPEAKING_ALLOWED_AUDIO_EXTENSIONS / SPEAKING_MAX_AUDIO_MB
 
 # Chunk yuklashda ruxsat etilgan kengaytmalar (static'dan xizmat qilinadi, shuning
 # uchun .html/.svg kabilar QAT'IYAN taqiqlangan).
@@ -407,11 +407,11 @@ class SpeakingService:
         return version, errors
 
     async def delete_test(self, test_id: str, force: bool = False) -> None:
-        """Speaking testni o'chirish (qoida: exams/mock/usage.py bilan bir xil).
+        """Speaking testni o'chirish: bog'liq yozuvlar, urinishlar va AI natijalar bilan birga.
 
-        * mock imtihon urinishida ishlatilgan              -> HAR DOIM 409
-        * yozuv, draft yoki practice urinish bor            -> 409; faqat force (SUPER_ADMIN) bilan
-        force=True: yozuvlar DB'dan, audio fayllar diskdan o'chadi (commit'dan keyin).
+        * mock imtihon urinishida ishlatilgan -> HAR DOIM 409
+        * qolgan hamma narsa (yozuvlar, draftlar, practice urinishlar, AI jobs/baholashlar) o'chadi;
+          audio fayllar commit'dan keyin diskdan o'chiriladi.
         """
         from sqlalchemy import delete as sa_delete
         from sqlalchemy import exists as sa_exists
@@ -430,18 +430,12 @@ class SpeakingService:
             raise HTTPException(409, "Bu test mock imtihon urinishida ishlatilgan, o'chirib bo'lmaydi.")
         await ensure_not_in_mock_exam(self.db, "speaking", test_id)
 
-        has_recordings = await self._has_recordings(test_id)
-        if has_recordings and not force:
-            raise HTTPException(
-                409,
-                "Bu testga audio yozuvlar bog'langan, o'chirib bo'lmaydi. Uni faolsizlantiring: "
-                "PUT {is_active: false}. Super admin bo'lsangiz force=true bilan majburiy o'chiring.",
-            )
+        # Test o'chirilganda unga bog'liq hamma yozuvlar ham o'chadi (natijalar, urinishlar, AI baholashlar).
         await ensure_deletable(
-            self.db, skill="speaking", module=PaperModule.SPEAKING, test_id=test_id, force=force,
+            self.db, skill="speaking", module=PaperModule.SPEAKING, test_id=test_id, force=True,
         )
 
-        media = await self._collect_media_paths(test_id) if has_recordings else []
+        media = await self._collect_media_paths(test_id)
         await self.db.execute(sa_delete(SpeakingRecordingDraft).where(SpeakingRecordingDraft.speaking_test_id == test_id))
         await self.db.execute(sa_delete(SpeakingSubmission).where(SpeakingSubmission.speaking_test_id == test_id))
         await purge_practice_attempts(self.db, "speaking", test_id)
@@ -611,7 +605,17 @@ class SpeakingService:
             _safe_remove(path)
             raise
         await self.db.refresh(submission)
-        return submission
+        # Javob sxemasi (full_name, username, ...) user va profile'ni async sessiyada lazy o'qiydi —
+        # ularni oldindan eager yuklaymiz, aks holda MissingGreenlet -> 500.
+        from sqlalchemy.orm import selectinload
+        from app.modules.auth.models import User as _User
+        loaded = (await self.db.execute(
+            select(SpeakingSubmission)
+            .options(selectinload(SpeakingSubmission.user).selectinload(_User.profile))
+            .where(SpeakingSubmission.id == submission.id)
+            .execution_options(populate_existing=True)
+        )).scalar_one()
+        return loaded
 
     async def _find_open_skill_attempt(self, user_id, speaking_test_id: str):
         """Shu user + test uchun hali tekshirilmagan eng so'nggi SPEAKING skill attempt."""
@@ -750,7 +754,7 @@ class SpeakingService:
                 raise HTTPException(409, "Bu urinish allaqachon baholangan")
 
         payload = data.model_dump(exclude={"overall_raw"})
-        payload["overall_band"] = writing_speaking_final(data.overall_raw)  # yakuniy ball 0–75
+        payload["overall_band"] = speaking_final(data.overall_raw)  # yakuniy ball 0–75 (reyting shkalasi)
         result = SpeakingResult(submission_id=submission_id, evaluator_id=evaluator_id, **payload)
         self.db.add(result)
         submission.status = "checked"

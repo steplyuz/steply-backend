@@ -85,15 +85,27 @@ def check_settings(r: Report) -> None:
         r.warn("RUN_TELEGRAM_BOT_IN_API=true: productionda bot alohida jarayon bo'lishi kerak")
     if not settings.ADMIN_ALLOWED_IPS:
         r.warn("ADMIN_ALLOWED_IPS bo'sh: admin paneli IP bilan cheklanmagan (MFA ham yo'q)")
+    if settings.SPEAKING_AI_ENABLED and not settings.OPENAI_API_KEY:
+        r.block("SPEAKING_AI_ENABLED=true, lekin OPENAI_API_KEY bo'sh")
     if not settings.OPENAI_API_KEY:
         r.warn("OPENAI_API_KEY bo'sh: Writing AI baholash ishlamaydi (qo'lda baholash kerak)")
-    if settings.SMS_REGISTRATION_ENABLED if hasattr(settings, "SMS_REGISTRATION_ENABLED") else False:
-        if not settings.ESKIZ_PASSWORD:
-            r.block("SMS ro'yxatdan o'tish yoqilgan, lekin ESKIZ parol bo'sh")
+    # SMS ro'yxatdan o'tish yoqilgan-yoqilmaganligi DB'da (admin sozlamasi), .env'da emas.
+    # Shuning uchun bu yerda faqat kredensiallar mavjudligi tekshiriladi.
+    if not (settings.ESKIZ_EMAIL and settings.ESKIZ_PASSWORD):
+        r.warn("ESKIZ_EMAIL/ESKIZ_PASSWORD bo'sh: SMS kodi va natija SMS'lari yuborilmaydi (SMS ro'yxatdan o'tish yoqilgan bo'lsa)")
     if settings.TELEGRAM_BOT_TOKEN:
         r.good("TELEGRAM_BOT_TOKEN sozlangan")
     else:
         r.warn("TELEGRAM_BOT_TOKEN bo'sh: Telegram ro'yxatdan o'tish ishlamaydi")
+    # Onlayn to'lov chekini tasdiqlash Telegram admin chati orqali ishlaydi.
+    # Bu sozlamalar bo'lmasa to'lovlar tasdiqlanmaydi — productionda bloker.
+    if settings.is_production:
+        if not (settings.TELEGRAM_BOT_TOKEN and settings.TELEGRAM_BILLING_ADMIN_CHAT_ID
+                and settings.TELEGRAM_BILLING_ADMIN_TELEGRAM_USER_ID):
+            r.block("Billing tasdiqlash uchun TELEGRAM_BOT_TOKEN, TELEGRAM_BILLING_ADMIN_CHAT_ID va "
+                    "TELEGRAM_BILLING_ADMIN_TELEGRAM_USER_ID majburiy (to'lovlar tasdiqlanmaydi)")
+        else:
+            r.good("Billing tasdiqlash (Telegram admin chat) sozlangan")
     if "localhost" in settings.TRUSTED_HOSTS and settings.is_production and len(settings.TRUSTED_HOSTS) == 1:
         r.block("TRUSTED_HOSTS faqat localhost: productionda domen(lar)ni kiriting")
 

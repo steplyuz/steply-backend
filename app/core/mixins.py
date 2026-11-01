@@ -16,8 +16,8 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Float, Integer, JSON, String, Uuid
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import Boolean, DateTime, ForeignKey, Float, Integer, JSON, String, Text, Uuid
+from sqlalchemy.orm import Mapped, declared_attr, mapped_column
 from sqlalchemy.sql import func
 
 
@@ -39,6 +39,34 @@ class TimestampMixin:
 #    (reading_tests.id, listening_tests.id, speaking_tests.id,
 #     writing_exams.id, mock_exams.id) — hammasi String(64), limit bilan.
 # ==========================================================
+
+class ExamCommonMixin:
+    """Barcha 4 skill testi (reading, listening, writing, speaking) uchun bir xil metadata.
+
+    Maydonlarning ma'nosi bir xil; testga xos default qiymatlar (masalan listening 35 daqiqa,
+    reading 60 daqiqa) subklassda qayta belgilanadi.
+
+    Mini-test (part-practice) bog'lanishi ham umumiy: parent_test_id (o'z jadvaliga FK) va
+    practice_part_number. Idempotentlik (parent_test_id, practice_part_number) bilan.
+    """
+
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cefr_level: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    duration_minutes: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    total_questions: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    practice_part_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    @declared_attr
+    def parent_test_id(cls) -> Mapped[Optional[str]]:
+        return mapped_column(
+            String(64),
+            ForeignKey(f"{cls.__tablename__}.id", ondelete="SET NULL", name=f"fk_{cls.__tablename__}_parent_test_id"),
+            nullable=True,
+            index=True,
+        )
+
 
 class ExamIdMixin:
     id: Mapped[str] = mapped_column(String(64), primary_key=True, index=True)

@@ -11,6 +11,9 @@ from typing import Optional, Dict, Any
 # shuning uchun mavjud hashlar o'zgarishsiz tekshiriladi (parametrlar hash ichida saqlanadi).
 _hasher = PasswordHasher(time_cost=2, memory_cost=102400, parallelism=4)
 
+# JWT algoritmi doimiy (sozlama emas): kalit almashtirilganda algoritm tasodifan o'zgarmasin.
+JWT_ALGORITHM = "HS256"
+
 # KONSTANTALAR - Domen cheklovlari uchun
 # Ilgari bu yerda domen hardcode qilingan edi (.env/settings'dan mustaqil holda),
 # endi settings.AUTH_DOMAIN'dan olinadi — CORS/COOKIE_DOMAIN bilan bitta manbadan
@@ -55,7 +58,7 @@ def create_access_token(user_id: "uuid.UUID | str", extra_data: Optional[Dict[st
             raise ValueError("Protected JWT claims cannot be overridden")
         payload.update(extra_data)
 
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 def decode_token(token: str, token_type: str) -> dict:
     """
@@ -65,7 +68,7 @@ def decode_token(token: str, token_type: str) -> dict:
         payload = jwt.decode(
             token,
             settings.SECRET_KEY,
-            algorithms=[settings.ALGORITHM],
+            algorithms=[JWT_ALGORITHM],
             audience=AUDIENCE,         # Audience tekshiruvi
             issuer=ISSUER,             # Issuer tekshiruvi
             options={

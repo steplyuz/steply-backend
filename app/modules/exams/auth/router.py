@@ -86,7 +86,7 @@ def get_service(db: AsyncSession = Depends(get_db)) -> ExamsAuthService:
 
 def _set_exams_cookies(response: Response, token: ExamsTokenResponse) -> None:
     cookie_kwargs = dict(
-        httponly=settings.COOKIE_HTTPONLY,
+        httponly=True,
         secure=settings.COOKIE_SECURE,
         samesite=settings.COOKIE_SAMESITE,
         path="/",

@@ -40,16 +40,17 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
 from app.modules.auth.models import User
-from app.core.mixins import ExamFlagsMixin, ExamIdMixin, TimestampMixin
+from app.core.mixins import ExamCommonMixin, ExamFlagsMixin, ExamIdMixin, TimestampMixin
 
 
-class SpeakingTest(Base, ExamIdMixin, ExamFlagsMixin, TimestampMixin):
+class SpeakingTest(Base, ExamIdMixin, ExamFlagsMixin, ExamCommonMixin, TimestampMixin):
     """Bitta to'liq speaking test (40+ tadan biri). Admin tomonidan yaratiladi."""
 
     __tablename__ = "speaking_tests"
 
-    title: Mapped[str] = mapped_column(String, nullable=False)
-    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    __table_args__ = (
+        UniqueConstraint("parent_test_id", "practice_part_number", name="uq_speaking_mini_test_part_number"),
+    )
 
     part_1_1: Mapped[Optional["SpeakingPart11"]] = relationship(
         back_populates="test", uselist=False, cascade="all, delete-orphan"

@@ -133,7 +133,7 @@ RATE_LIMIT_TEST_REDIS_URL=redis://localhost:6379/1 RATE_LIMIT_STORAGE_URI=redis:
 - Submit an essay: `POST /api/v1/writing-tests/{exam_id}/submit` with JSON `{"answers":[{"task_id":123,"content":"..."}]}`. The response contains the persisted `WritingResult` and its answers.
 - Request AI feedback: `POST /api/v1/writing-tests/results/{result_id}/ai-check` with JSON `{"answer_id": null}`. `answer_id` may identify one answer; omit/null means evaluate all answers that do not already have AI feedback.
 - Authentication uses the existing httpOnly session cookies. The result must belong to the authenticated user.
-- AI feedback is available to PLUS subscribers only. `ai_limit` is measured in Writing answers, not HTTP requests. The server checks quota before calling the configured OpenAI model; saved AI feedback is the usage record, so repeating a completed request returns the saved result without a second provider call or quota use.
+- AI feedback uses the shared AI credits pool (Writing: 1 answer = 1 credit; Speaking: 1 evaluation = 1 credit). `ai_limit` on a plan is the monthly pool; purchased credits (`ai_credits` product, shared by Writing and Speaking) are spent after it. Saved AI feedback is the usage record, so repeating a completed request does not bill twice.
 - Configure `OPENAI_API_KEY` and optionally `OPENAI_MODEL` in the backend environment. Without an API key, the endpoint returns HTTP 503; it does not fabricate a score.
 - Common errors: `401` unauthenticated, `403` tier/entitlement denied, `404` result/answer not found or not owned by the user, `429` quota exhausted, `502` invalid/provider evaluation response, `503` AI service not configured.
 - AI scoring is a draft (`evaluation_status=AI_DRAFT`, `is_finalized=false`), not a certified final grade. A teacher/admin can finalize it through `POST /api/v1/admin/writing-tests/results/{result_id}/grade`.
@@ -141,9 +141,9 @@ RATE_LIMIT_TEST_REDIS_URL=redis://localhost:6379/1 RATE_LIMIT_STORAGE_URI=redis:
 
 ## Writing AI kreditlari (0011)
 
-Writing AI limiti obuna ichidagi oylik `SubscriptionPlan.ai_limit` kvotasi va alohida sotib olinadigan `WRITING_AI_CREDITS` kreditlaridan tuziladi. Xarid mahsuloti admin katalogida yaratilganda `external_ref` maydoniga kreditlar soni (masalan, `20`) yoziladi. Foydalanuvchi `POST /api/v1/billing/orders` orqali `product_type: "writing_ai_credits"` va mahsulot ID sini yuboradi; chek yuklanib, admin buyurtmani tasdiqlagandan so'ng kreditlar faollashadi.
+Writing AI limiti obuna ichidagi oylik `SubscriptionPlan.ai_limit` kvotasi va alohida sotib olinadigan `AI_CREDITS` kreditlaridan tuziladi. Xarid mahsuloti admin katalogida yaratilganda `external_ref` maydoniga kreditlar soni (masalan, `20`) yoziladi. Foydalanuvchi `POST /api/v1/billing/orders` orqali `product_type: "ai_credits"` va mahsulot ID sini yuboradi; chek yuklanib, admin buyurtmani tasdiqlagandan so'ng kreditlar faollashadi.
 
-Migratsiya: `alembic upgrade head`. `GET /api/v1/billing/me/limits` javobidagi `ai.subscription_remaining`, `ai.purchased_remaining` va `ai.remaining` mos ravishda obuna kvotasi, xarid kreditlari va umumiy mavjud Writing AI tekshiruvlarini bildiradi. AI tekshiruv sarfi `writing_ai_usage` ledgerida answer ID bo'yicha bir martalik yoziladi.
+Migratsiya: `alembic upgrade head`. `GET /api/v1/billing/me/limits` javobidagi `ai.subscription_remaining`, `ai.purchased_remaining` va `ai.remaining` mos ravishda obuna kvotasi, xarid kreditlari va umumiy mavjud AI kreditlarni bildiradi (Writing + Speaking). Sarf bitta `ai_usage` ledgerida yoziladi (Writing: answer ID, Speaking: job ID).
 
 
 ## Billing admin Telegram review (optional)
@@ -152,12 +152,13 @@ To forward uploaded payment receipts to a private Telegram admin chat and allow 
 
 - `TELEGRAM_BOT_TOKEN`: bot token.
 - `TELEGRAM_BILLING_ADMIN_CHAT_ID`: target private chat or controlled admin group ID.
-- `TELEGRAM_BILLING_ADMIN_TELEGRAM_USER_ID`: numeric Telegram ID allowed to press the review buttons.
-- `TELEGRAM_BILLING_ADMIN_USER_ID`: UUID of a real `ADMIN` or `SUPER_ADMIN` account used for audit attribution.
+- `TELEGRAM_BILLING_ADMIN_TELEGRAM_USER_ID`: numeric Telegram ID allowed to press the review buttons. The bot checks this value and forwards the clicking admin's Telegram ID to the API.
 - `INTERNAL_API_TOKEN`: shared secret between bot and backend; use a strong random value.
-- `BACKEND_URL`: API base URL ending in `/api/v1`.
+- `BACKEND_URL` (bot only): API base URL ending in `/api/v1`.
 
-Apply migrations before starting the API. Telegram review is disabled until the required settings are present. If notification delivery fails, receipt upload remains stored and the order stays in `under_review` for review in the web admin panel.
+There is no separate reviewer UUID setting. The API resolves the reviewer from the Telegram identity (`Identity(provider="telegram")`) linked to a real `ADMIN` or `SUPER_ADMIN` account, so that admin must sign in with Telegram once. A review from an unlinked Telegram account returns HTTP 403.
+
+Apply migrations before starting the API. Telegram review is disabled until the required settings are present; `scripts/preflight.py` blocks production when they are missing. If notification delivery fails, receipt upload remains stored and the order stays in `under_review` for review in the web admin panel. The full payment flow is described in `docs/PAYMENTS.md`.
 
 ## Writing AI grading with Amazon Bedrock (OpenAI-compatible API)
 

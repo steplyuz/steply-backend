@@ -54,6 +54,9 @@ def _reset_limiter():
 
 
 async def test_put_fixed_2025_json_updates_exam(admin):
+    import os
+    if not os.path.exists(FIXED):
+        pytest.skip("tuzatilgan JSON fayl bu muhitda yo'q")
     body = {"title": "Seed", "cefr_level": "B2", "duration_minutes": 60, "tasks": [
         {"part_number": 1, "sub_part": 1, "topic": "Informal email", "instruction": "Write an email.", "format_id": None},
         {"part_number": 1, "sub_part": 2, "topic": "Formal email", "instruction": "Write a letter."},

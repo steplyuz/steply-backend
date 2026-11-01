@@ -144,7 +144,6 @@ class ReadingService(PaperVersionedExamMixin):
             total_questions=total_questions, is_demo=data.is_demo,
             is_free=data.is_free, is_practice=data.is_practice, is_active=data.is_active,
             parent_test_id=getattr(data, "parent_test_id", None),
-            source_part_id=getattr(data, "source_part_id", None),
             practice_part_number=getattr(data, "practice_part_number", None),
         )
 
@@ -184,7 +183,7 @@ class ReadingService(PaperVersionedExamMixin):
         existing_rows = await self.db.execute(
             select(ReadingTest).where(ReadingTest.parent_test_id == source.id)
         )
-        existing = {row.source_part_id: row for row in existing_rows.scalars().all()}
+        existing = {row.practice_part_number: row for row in existing_rows.scalars().all()}
         created = []
         new_count = 0
         ordered_parts = sorted(source.parts, key=lambda item: item.id or 0)
@@ -192,7 +191,7 @@ class ReadingService(PaperVersionedExamMixin):
         per_part_minutes = 20  # Reading practice: har bir part 20 daqiqa
 
         for part_number, part in enumerate(ordered_parts, start=1):
-            mini = existing.get(part.id)
+            mini = existing.get(part_number)
             if mini is None:
                 mini_id = generate_reading_id()
                 mini = ReadingTest(
@@ -207,7 +206,6 @@ class ReadingService(PaperVersionedExamMixin):
                     is_practice=True,
                     is_active=bool(source.is_active),
                     parent_test_id=source.id,
-                    source_part_id=part.id,
                     practice_part_number=part_number,
                 )
                 mini_part = ReadingPart(

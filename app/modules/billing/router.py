@@ -4,7 +4,7 @@ from uuid import UUID
 from app.core.paths import PRIVATE_DIR
 from app.core.internal_auth import verify_internal_token
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,6 +19,9 @@ from app.modules.billing.models import (
 )
 from app.modules.billing import entitlements
 from app.modules.billing.promo import calculate_discount, redeem_promo, release_promo, validate_promo
+from app.modules.billing.review import grant_subscription
+from app.modules.billing import inpay
+from app.core.config import settings
 from app.modules.billing.response_schemas import (
     LimitsPublic, OrderPublic, PlanPublic, ProductPublic, PromoCodePublic, SubscriptionPublic,
 )
@@ -115,6 +118,10 @@ class ProductUpdate(BaseModel):
         return self
 
 
+class PromoActivateRequest(BaseModel):
+    code: str = Field(min_length=2, max_length=50)
+
+
 class ReviewBody(BaseModel):
     note: str | None = Field(default=None, max_length=1000)
 
@@ -126,7 +133,7 @@ class PlanCreate(BaseModel):
     tier: SubscriptionTier
     ai_limit: int = Field(default=0, ge=0)
     exam_limit: int = Field(default=0, ge=0)
-    included_skills: list[str] = Field(default_factory=lambda: ["READING", "LISTENING", "WRITING", "SPEAKING"])
+    included_skills: list[str] = Field(default_factory=lambda: ["READING", "LISTENING", "WRITING"])
     ai_enabled: bool = True
     discount_percent: int = Field(default=0, ge=0, le=100)
     is_active: bool = True
@@ -149,6 +156,7 @@ class PromoCodeCreate(BaseModel):
     valid_from: datetime | None = None
     valid_until: datetime | None = None
     is_active: bool = True
+    activates_plan_id: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _validate_discount(self):
@@ -211,10 +219,11 @@ class PromoCodeUpdate(BaseModel):
     valid_from: datetime | None = None
     valid_until: datetime | None = None
     is_active: bool | None = None
+    activates_plan_id: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def _no_null_for_required(self):
-        nullable = {"discount_percent", "discount_amount", "max_usage", "valid_from", "valid_until"}
+        nullable = {"discount_percent", "discount_amount", "max_usage", "valid_from", "valid_until", "activates_plan_id"}
         for field in self.model_fields_set - nullable:
             if getattr(self, field) is None:
                 raise ValueError(f"{field} null bo'lishi mumkin emas")
@@ -244,7 +253,44 @@ async def validate_promo_code(data: PromoValidateRequest, user: User = Depends(g
     promo = await validate_promo(db, data.code, user_id=user.id)
     discount = calculate_discount(data.amount, discount_percent=promo.discount_percent, discount_amount=promo.discount_amount)
     return {"code": promo.code, "discount_amount": discount, "final_amount": data.amount - discount,
-            "discount_percent": promo.discount_percent, "fixed_discount_amount": promo.discount_amount}
+            "discount_percent": promo.discount_percent, "fixed_discount_amount": promo.discount_amount,
+            # Frontend uchun: promo qaysi tarifga bog'langan va to'lovsiz (100%) faollashtiradimi.
+            "activates_plan_id": promo.activates_plan_id,
+            "is_free_activation": promo.activates_plan_id is not None and promo.discount_percent == 100}
+
+
+@router.post("/billing/promo/activate", status_code=201, response_model=OrderPublic)
+async def activate_promo_subscription(data: PromoActivateRequest, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """100% chegirmali promo bilan tarifni darhol faollashtiradi (admin tasdig'isiz).
+
+    Buyurtma PAID holatida 0 so'm bilan yoziladi — foydalanuvchi uchun "sotib olingan" yozuv bo'ladi.
+    """
+    await db.execute(update(User).where(User.id == user.id).values(updated_at=User.updated_at))
+    promo = await validate_promo(db, data.code, user_id=user.id)
+    if promo.activates_plan_id is None or promo.discount_percent != 100:
+        raise HTTPException(400, "Bu promo kod bepul obunani faollashtirmaydi")
+    plan = await db.get(SubscriptionPlan, promo.activates_plan_id)
+    if not plan or not plan.is_active:
+        raise HTTPException(404, "Faol tarif topilmadi")
+    now = datetime.now(timezone.utc)
+    order = BillingOrder(
+        user_id=user.id, product_type=BillingProductType.SUBSCRIPTION, product_id=str(plan.id),
+        product_title=plan.name, amount=0, original_amount=int(plan.price),
+        discount_amount=int(plan.price), status=BillingOrderStatus.PAID, reviewed_at=now,
+    )
+    db.add(order)
+    await db.flush()
+    await redeem_promo(db, user_id=user.id, code=promo.code, base_amount=int(plan.price), order=order)
+    await grant_subscription(db, user.id, plan, now)
+    await db.commit()
+    await db.refresh(order)
+    return order
+
+
+@router.get("/billing/me/ai-quota")
+async def my_ai_quota(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    """Umumiy AI kreditlar (Writing + Speaking): oylik obuna limiti + sotib olingan kreditlar."""
+    return await entitlements.get_ai_quota(db, user.id)
 
 
 @router.post("/billing/orders", status_code=201, response_model=OrderPublic)
@@ -262,20 +308,20 @@ async def create_order(data: OrderCreate, user: User = Depends(get_current_user)
         original_price = int(plan.price)
         amount = plan.price - calculate_discount(plan.price, discount_percent=plan.discount_percent, discount_amount=None)
         title, product_id = plan.name, str(plan.id)
-    elif data.product_type == BillingProductType.WRITING_AI_CREDITS:
+    elif data.product_type == BillingProductType.AI_CREDITS:
         try:
             product_id = int(data.product_id or "")
         except ValueError:
-            raise HTTPException(422, "Writing AI krediti uchun product_id katalog ID bo‘lishi kerak")
+            raise HTTPException(422, "AI kredit uchun product_id katalog ID bo‘lishi kerak")
         product = await db.get(BillingProduct, product_id)
-        if not product or not product.is_active or product.product_type != BillingProductType.WRITING_AI_CREDITS:
-            raise HTTPException(404, "Faol Writing AI kredit mahsuloti topilmadi")
+        if not product or not product.is_active or product.product_type != BillingProductType.AI_CREDITS:
+            raise HTTPException(404, "Faol AI kredit mahsuloti topilmadi")
         try:
             credits = int(product.external_ref or "0")
         except ValueError:
             credits = 0
         if credits < 1:
-            raise HTTPException(409, "Writing AI mahsulotida external_ref kreditlar soni sifatida sozlanmagan")
+            raise HTTPException(409, "AI kredit mahsulotida external_ref kreditlar soni sifatida sozlanmagan")
         amount, title, product_id = product.price, product.title, str(product.id)
     elif data.product_type == BillingProductType.TEACHER_REVIEW_CREDITS:
         try:
@@ -337,7 +383,7 @@ async def create_order(data: OrderCreate, user: User = Depends(get_current_user)
             return pending
         amount, title, product_id = int(exam.price), exam.title, exam.id
     else:
-        raise HTTPException(410, "Ushbu mahsulot turi eskirgan. Faqat PLUS/PRO subscription, FULL_EXAM, WRITING_AI_CREDITS yoki TEACHER_REVIEW_CREDITS xaridi mavjud.")
+        raise HTTPException(410, "Ushbu mahsulot turi eskirgan. Faqat PLUS/PRO subscription, FULL_EXAM, AI_CREDITS yoki TEACHER_REVIEW_CREDITS xaridi mavjud.")
     if original_price is None:
         original_price = int(amount)
     order = BillingOrder(
@@ -348,12 +394,48 @@ async def create_order(data: OrderCreate, user: User = Depends(get_current_user)
     db.add(order)
     await db.flush()
     if data.promo_code:
+        promo_obj = await validate_promo(db, data.promo_code, user_id=user.id)
+        if promo_obj.activates_plan_id is not None:
+            if promo_obj.discount_percent == 100:
+                raise HTTPException(409, "Bu bepul obuna promosi: uni /billing/promo/activate orqali ishlating")
+            if order.product_type != BillingProductType.SUBSCRIPTION or order.product_id != str(promo_obj.activates_plan_id):
+                raise HTTPException(400, "Bu promo kod boshqa tarif uchun")
         await redeem_promo(db, user_id=user.id, code=data.promo_code, base_amount=amount, order=order)
         # Hisobotda tarif chegirmasi va promo chegirmasi birgalikda ko‘rinadi.
         order.original_amount = original_price
         order.discount_amount = max(0, original_price - order.amount)
+    # inPAY: onlayn to'lov havolasi. Admin tekshiruvi kerak emas: to'lov webhook orqali avtomatik tasdiqlanadi.
+    if inpay.is_enabled() and order.amount >= inpay.MIN_AMOUNT_UZS:
+        payment = await inpay.create_payment(
+            amount=order.amount, description=order.product_title, order_id=order.id,
+            idempotency_key=f"order-{order.id}",
+        )
+        order.payment_provider = "inpay"
+        order.provider_payment_id = str(payment["id"])
+        order.provider_checkout_url = payment.get("checkout_url")
     await db.commit(); await db.refresh(order)
     return order
+
+
+@router.post("/billing/inpay/webhook", include_in_schema=False)
+async def inpay_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    """inPAY webhook: imzo tekshiriladi, to'lov tasdiqlansa buyurtma avtomatik PAID bo'ladi."""
+    if not settings.INPAY_WEBHOOK_SECRET:
+        raise HTTPException(503, "Webhook sir sozlanmagan")
+    raw = await request.body()
+    try:
+        inpay.verify_signature(
+            raw, request.headers.get("X-Inpay-Signature", ""), settings.INPAY_WEBHOOK_SECRET,
+            int(datetime.now(timezone.utc).timestamp()), settings.INPAY_WEBHOOK_TOLERANCE_SECONDS,
+        )
+    except ValueError as exc:
+        raise HTTPException(400, f"Webhook imzosi yaroqsiz: {exc}")
+    try:
+        event = json.loads(raw)
+    except ValueError:
+        raise HTTPException(400, "Webhook tanasi JSON emas")
+    result = await inpay.handle_event(db, event, datetime.now(timezone.utc))
+    return {"received": True, "result": result}
 
 @router.post("/billing/orders/{order_id}/cancel")
 async def cancel_order(order_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
@@ -378,6 +460,8 @@ async def cancel_order(order_id: str, user: User = Depends(get_current_user), db
     if result.rowcount != 1:
         await db.rollback()
         raise HTTPException(409, "Bu buyurtmani bekor qilib bo'lmaydi")
+    if order.provider_payment_id:
+        await inpay.cancel_payment(order.provider_payment_id)
     await release_promo(db, order)
     await db.commit()
     await db.refresh(order)
@@ -388,6 +472,7 @@ async def upload_receipt(order_id: str, file: UploadFile = File(...), user: User
     order = await db.get(BillingOrder, order_id)
     if not order or order.user_id != user.id: raise HTTPException(404, "Buyurtma topilmadi")
     if order.status not in (BillingOrderStatus.PENDING_PAYMENT, BillingOrderStatus.REJECTED): raise HTTPException(409, "Bu buyurtma uchun chek yuborib bo‘lmaydi")
+    if order.payment_provider == "inpay": raise HTTPException(409, "Bu buyurtma onlayn to‘lov orqali amalga oshiriladi — chek yuklash talab qilinmaydi.")
     ext = ALLOWED.get(file.content_type or "")
     if not ext: raise HTTPException(415, "Chek JPG, PNG, WEBP yoki PDF bo‘lishi kerak")
     content = await file.read(MAX_BYTES + 1)
@@ -460,6 +545,10 @@ async def my_orders(offset: int = Query(0, ge=0), limit: int = Query(25, ge=1, l
 async def order_detail(order_id: str, user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
     order = await db.get(BillingOrder, order_id)
     if not order or order.user_id != user.id: raise HTTPException(404, "Buyurtma topilmadi")
+    # Webhook yetib bormagan bo'lsa (masalan, local dev), inPAY holatini o'zimiz so'raymiz.
+    if order.status == BillingOrderStatus.PENDING_PAYMENT and order.payment_provider == "inpay":
+        await inpay.sync_order_payment(db, order, datetime.now(timezone.utc))
+        await db.refresh(order)
     return order
 
 @router.get("/billing/me/subscription", response_model=Optional[SubscriptionPublic])
@@ -510,6 +599,43 @@ async def my_limits(user: User = Depends(get_current_user), db: AsyncSession = D
     """
     return await entitlements.get_remaining_limits(db, user.id)
 
+class AdminGrantSubscriptionRequest(BaseModel):
+    plan_id: int
+    note: str | None = Field(default=None, max_length=300)
+
+
+@admin_router.post("/users/{user_id}/grant-subscription", status_code=201, response_model=OrderPublic)
+async def admin_grant_subscription(
+    user_id: UUID,
+    data: AdminGrantSubscriptionRequest,
+    admin: User = Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN)),
+    db: AsyncSession = Depends(get_db),
+):
+    """Admin istalgan foydalanuvchiga istalgan tarifni darhol beradi (to'lov va tekshiruvsiz).
+
+    Buyurtma PAID holatda 0 so'm bilan yoziladi (audit: kim bergani, izoh bilan).
+    """
+    user = await db.get(User, user_id)
+    if user is None:
+        raise HTTPException(404, "Foydalanuvchi topilmadi")
+    plan = await db.get(SubscriptionPlan, data.plan_id)
+    if plan is None or not plan.is_active:
+        raise HTTPException(404, "Faol tarif topilmadi")
+    now = datetime.now(timezone.utc)
+    order = BillingOrder(
+        user_id=user.id, product_type=BillingProductType.SUBSCRIPTION, product_id=str(plan.id),
+        product_title=plan.name, amount=0, original_amount=int(plan.price), discount_amount=int(plan.price),
+        status=BillingOrderStatus.PAID, reviewed_by=admin.id, reviewed_at=now,
+        admin_note=("Admin tomonidan berildi" + (f": {data.note}" if data.note else ""))[:1000],
+    )
+    db.add(order)
+    await db.flush()
+    await grant_subscription(db, user.id, plan, now)
+    await db.commit()
+    await db.refresh(order)
+    return order
+
+
 @admin_router.get("/plans", response_model=list[PlanPublic])
 async def admin_plans(_: User = Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN)), db: AsyncSession = Depends(get_db)):
     return (await db.execute(select(SubscriptionPlan).order_by(SubscriptionPlan.id))).scalars().all()
@@ -549,6 +675,8 @@ async def admin_create_promo(data: PromoCodeCreate, _: User = Depends(require_ro
     exists = (await db.execute(select(PromoCode.id).where(PromoCode.code == code))).scalar_one_or_none()
     if exists:
         raise HTTPException(409, "Bu promo kod allaqachon mavjud")
+    if data.activates_plan_id is not None and await db.get(SubscriptionPlan, data.activates_plan_id) is None:
+        raise HTTPException(404, "Bog'langan tarif topilmadi")
     promo = PromoCode(**data.model_dump(exclude={"code"}), code=code)
     db.add(promo); await db.commit(); await db.refresh(promo)
     return promo
@@ -576,6 +704,8 @@ async def admin_update_promo(promo_id: int, data: PromoCodeUpdate, _: User = Dep
         raise HTTPException(422, "discount_percent va discount_amount bir vaqtda berilmaydi")
     if final["valid_from"] and final["valid_until"] and final["valid_from"] > final["valid_until"]:
         raise HTTPException(422, "valid_until valid_from dan oldin bo'lishi mumkin emas")
+    if changes.get("activates_plan_id") is not None and await db.get(SubscriptionPlan, changes["activates_plan_id"]) is None:
+        raise HTTPException(404, "Bog'langan tarif topilmadi")
     for key, value in changes.items():
         setattr(promo, key, value)
     await db.commit(); await db.refresh(promo)
@@ -588,8 +718,8 @@ async def admin_products(_: User = Depends(require_role(UserRole.ADMIN, UserRole
 
 @admin_router.post("/products", status_code=201, response_model=ProductPublic)
 async def create_product(data: ProductCreate, _: User = Depends(require_role(UserRole.ADMIN, UserRole.SUPER_ADMIN)), db: AsyncSession = Depends(get_db)):
-    if data.product_type not in (BillingProductType.FULL_EXAM, BillingProductType.WRITING_AI_CREDITS, BillingProductType.TEACHER_REVIEW_CREDITS):
-        raise HTTPException(422, "Billing katalogida FULL_EXAM, WRITING_AI_CREDITS yoki TEACHER_REVIEW_CREDITS mahsuloti yaratilishi mumkin")
+    if data.product_type not in (BillingProductType.FULL_EXAM, BillingProductType.AI_CREDITS, BillingProductType.TEACHER_REVIEW_CREDITS):
+        raise HTTPException(422, "Billing katalogida FULL_EXAM, AI_CREDITS yoki TEACHER_REVIEW_CREDITS mahsuloti yaratilishi mumkin")
     exists = (await db.execute(select(BillingProduct.id).where(BillingProduct.code == data.code))).scalar_one_or_none()
     if exists:
         raise HTTPException(409, "Bu mahsulot code'i allaqachon mavjud")
@@ -600,13 +730,13 @@ async def create_product(data: ProductCreate, _: User = Depends(require_role(Use
         exam = await db.get(MockExam, data.external_ref)
         if not exam or not exam.is_active:
             raise HTTPException(404, "Bog‘langan MockExam topilmadi")
-    elif data.product_type == BillingProductType.WRITING_AI_CREDITS:
+    elif data.product_type == BillingProductType.AI_CREDITS:
         try:
             credits = int(data.external_ref or "0")
         except ValueError:
             credits = 0
         if credits < 1 or credits > 10000:
-            raise HTTPException(422, "Writing AI mahsuloti external_ref maydonida 1–10000 oralig‘idagi kredit soni bo‘lishi kerak")
+            raise HTTPException(422, "AI kredit mahsuloti external_ref maydonida 1–10000 oralig‘idagi kredit soni bo‘lishi kerak")
     if data.product_type == BillingProductType.TEACHER_REVIEW_CREDITS:
         try:
             credits = int(data.external_ref or "0")
@@ -648,13 +778,13 @@ async def update_product(
         exam = await db.get(MockExam, external_ref)
         if not exam or not exam.is_active:
             raise HTTPException(404, "Bog‘langan faol MockExam topilmadi")
-    elif is_active and product.product_type == BillingProductType.WRITING_AI_CREDITS:
+    elif is_active and product.product_type == BillingProductType.AI_CREDITS:
         try:
             credits = int(external_ref or "0")
         except ValueError:
             credits = 0
         if credits < 1 or credits > 10000:
-            raise HTTPException(422, "Writing AI mahsuloti external_ref maydonida 1–10000 oralig‘idagi kredit soni bo‘lishi kerak")
+            raise HTTPException(422, "AI kredit mahsuloti external_ref maydonida 1–10000 oralig‘idagi kredit soni bo‘lishi kerak")
     elif is_active and product.product_type == BillingProductType.TEACHER_REVIEW_CREDITS:
         try:
             credits = int(external_ref or "0")
@@ -672,18 +802,22 @@ async def update_product(
 @router.post("/billing/telegram/review", dependencies=[Depends(verify_internal_token)])
 async def telegram_review_order(data: dict, db: AsyncSession = Depends(get_db)):
     """Faqat botning internal tokeni bilan chaqiriladigan chek ko‘rib chiqish endpointi."""
-    from uuid import UUID
-    from app.core.config import settings
-    from app.modules.auth.models import UserRole
+    from app.modules.auth.models import Identity, UserRole
     from app.modules.billing import review
-    if not settings.TELEGRAM_BILLING_ADMIN_USER_ID:
-        raise HTTPException(503, "TELEGRAM_BILLING_ADMIN_USER_ID sozlanmagan")
-    try:
-        reviewer_id = UUID(settings.TELEGRAM_BILLING_ADMIN_USER_ID)
-        order_id = str(data.get("order_id", ""))
-        action = str(data.get("action", ""))
-    except (ValueError, TypeError):
-        raise HTTPException(422, "Buyurtma yoki admin identifikatori noto‘g‘ri")
+    # Reviewer endi .env'da UUID sifatida emas: bot Telegram user ID'ni yuboradi,
+    # u Steply admin akkauntiga Identity(provider='telegram') orqali bog'lanadi.
+    # Bitta manba — ikkita .env kaliti (USER_ID va TELEGRAM_USER_ID) o'rniga.
+    reviewer_tg_id = str(data.get("reviewer_telegram_id", "")).strip()
+    if not reviewer_tg_id.isdigit():
+        raise HTTPException(422, "reviewer_telegram_id noto‘g‘ri")
+    order_id = str(data.get("order_id", ""))
+    action = str(data.get("action", ""))
+    reviewer_id = (await db.execute(select(Identity.user_id).where(
+        Identity.provider == "telegram",
+        Identity.provider_user_id == reviewer_tg_id,
+    ))).scalar_one_or_none()
+    if reviewer_id is None:
+        raise HTTPException(403, "Bu Telegram akkaunt Steply admin akkauntiga bog‘lanmagan")
     admin = await db.get(User, reviewer_id)
     if not admin or admin.role not in (UserRole.ADMIN, UserRole.SUPER_ADMIN):
         raise HTTPException(403, "Telegram billing admin foydalanuvchisi admin emas")
@@ -825,5 +959,3 @@ async def set_payment_details(
         db.add(setting)
     await db.commit()
     return data
-
-

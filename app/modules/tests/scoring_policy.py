@@ -103,6 +103,33 @@ def writing_speaking_final(raw: float) -> int:
     return grade
 
 
+# ---------------------------------------------------------------------------
+# Gapirish (Speaking): ko'p darajali format, rasmiy "reyting shkalasi" (reyting_shkala.pdf).
+# Xom ball = to'rt qism ballari yig'indisi: 1.1 (0–5) + 1.2 (0–5) + 2 (0–5) + 3 (0–6) = 0–21.
+# Yakuniy ball 0–75 rasmiy jadval bo'yicha. Xom ball yarim qadam bilan berilgan.
+# ---------------------------------------------------------------------------
+SPEAKING_RAW_MAX = 21
+SPEAKING_PART_MAX = {"1.1": 5, "1.2": 5, "2": 5, "3": 6}
+
+SPEAKING_RAW_TO_SCALE: dict[float, int] = {
+    21: 75, 20.5: 73, 20: 71, 19.5: 69, 19: 67, 18.5: 65, 18: 64, 17.5: 63,
+    17: 61, 16.5: 59, 16: 57, 15.5: 56, 15: 54, 14.5: 52, 14: 51, 13.5: 50,
+    13: 49, 12.5: 47, 12: 46, 11.5: 45, 11: 43, 10.5: 42, 10: 40, 9.5: 39,
+    9: 38, 8.5: 37, 8: 35, 7.5: 33, 7: 32, 6.5: 30, 6: 29, 5.5: 27, 5: 26,
+    4.5: 24, 4: 23, 3.5: 21, 3: 19, 2.5: 17, 2: 15, 1.5: 13, 1: 11, 0.5: 10, 0: 0,
+}
+
+
+def speaking_final(raw: float) -> int:
+    """Gapirish xom ball (0–21, yarim qadam) → yakuniy ball (0–75) rasmiy jadval bo'yicha."""
+    if raw is None or raw < 0 or raw > SPEAKING_RAW_MAX + 1e-9:
+        raise ValueError("gapirish xom bali 0–21 oralig'ida bo'lishi kerak")
+    key = float(raw)
+    if key not in SPEAKING_RAW_TO_SCALE:
+        raise ValueError("gapirish xom bali yarim qadam bilan berilishi kerak")
+    return SPEAKING_RAW_TO_SCALE[key]
+
+
 def aggregate_writing(parts: Iterable[tuple[int, float | None]]) -> tuple[float | None, int | None]:
     """(qism_raqami, raw) juftliklaridan yozma ish natijasi.
 

@@ -29,7 +29,7 @@ from app.core.config import settings
 from app.core.database import init_db
 from app.modules.auth.models import User, UserRole
 from app.modules.billing import review
-from app.modules.billing.entitlements import get_user_tier
+from app.modules.billing.entitlements import plan_allows_skill, get_active_subscriptions, get_user_tier
 from app.modules.billing.models import (
     BillingOrder, BillingOrderStatus, BillingProductType, SubscriptionPlan, SubscriptionTier,
     TierPracticeLimit, UserSubscription,
@@ -120,7 +120,8 @@ def _aware(dt: datetime) -> datetime:
 # 1. Obuna stacking
 # --------------------------------------------------------------------------
 
-async def test_premium_bought_during_pro_starts_after_pro_ends():
+async def test_premium_bought_during_pro_starts_now_and_stacks_with_pro():
+    """Boshqa tarif sotib olinsa darhol boshlanadi: limitlar va ko'nikmalar qo'shiladi."""
     pro_plan = await _plan(SubscriptionTier.PRO)
     premium_plan = await _plan(SubscriptionTier.PREMIUM)
     uid = await _user()
@@ -133,14 +134,14 @@ async def test_premium_bought_during_pro_starts_after_pro_ends():
     await _approve_grant(await _order(uid, premium_plan))
 
     subs = await _subs(uid)
-    pro_end = _aware(subs[0][1])
     premium_start, premium_end, _ = subs[1]
-    assert abs((_aware(premium_start) - pro_end).total_seconds()) < 2
+    assert abs((_aware(premium_start) - now).total_seconds()) < 60
     assert _aware(premium_end) - _aware(premium_start) == timedelta(days=30)
 
-    # PRO tugamaguncha foydalanuvchi PRO bo'lib qoladi; PREMIUM hozir ruxsat bermaydi.
     async with dbm.AsyncSessionLocal() as s:
-        assert await get_user_tier(s, uid) == SubscriptionTier.PRO
+        assert await plan_allows_skill(s, uid, "READING")
+        assert not await plan_allows_skill(s, uid, "SPEAKING")  # tarifda SPEAKING yoqilmagan
+        assert len(await get_active_subscriptions(s, uid)) == 2
 
 
 async def test_concurrent_approvals_do_not_stack_on_same_start():

@@ -1,3 +1,4 @@
+import json
 import secrets
 from datetime import date
 from typing import Optional
@@ -11,6 +12,7 @@ from app.core.captcha import require_captcha
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.rate_limit import _get_ip, limiter
+from app.modules.admin.system_settings import SystemSetting
 from app.modules.auth.models import Gender, User, UserProfile, UserRole
 from app.modules.exams.mock.applicant_media import is_own_photo_url, save_applicant_photo
 from app.modules.exams.mock.applicant_rules import normalize_phone, normalize_region
@@ -45,9 +47,41 @@ async def _load_open_session(db: AsyncSession, registration_slug: str):
 
 # ─── Public Registration (login talab qilinmaydi) ────────────────────────────
 
+_PAYMENT_FIELDS = (
+    ("bank_name", "Bank"),
+    ("card_number", "Karta raqami"),
+    ("card_holder", "Karta egasi"),
+    ("account_number", "Hisob raqami"),
+    ("phone_number", "Telefon"),
+)
+_DEFAULT_INSTRUCTIONS_PREFIX = "To'lov rekvizitlari hali sozlanmagan"
+
+
 async def _payment_details(db: AsyncSession, session, exam):
-    """To'lov rekvizitlari manbai (tashkilot hisobi) olib tashlangan: hozircha ko'rsatilmaydi."""
-    return None
+    """Admin sozlagan to'lov rekvizitlari (`billing_payment_details`) — ochiq /apply sahifasi uchun matn.
+
+    Manba: billing/router.py PUT /admin/billing/payment-details (DB, .env emas).
+    Bepul imtihonda yoki rekvizit kiritilmagan bo'lsa None — taxmin qilingan
+    karta raqami hech qachon ko'rsatilmaydi.
+    """
+    if not exam.price or exam.price <= 0:
+        return None
+    raw = (await db.execute(
+        select(SystemSetting.value).where(SystemSetting.key == "billing_payment_details")
+    )).scalar_one_or_none()
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return None
+    lines = [f"{label}: {str(data[key]).strip()}" for key, label in _PAYMENT_FIELDS if str(data.get(key) or "").strip()]
+    if not lines:
+        return None
+    instructions = str(data.get("instructions") or "").strip()
+    if instructions and not instructions.startswith(_DEFAULT_INSTRUCTIONS_PREFIX):
+        lines.append(instructions)
+    return "\n".join(lines)
 
 
 @router.get('/apply/{registration_slug}', response_model=ApplySessionPublic)

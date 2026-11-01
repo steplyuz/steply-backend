@@ -109,7 +109,7 @@ async def test_one_attempt_is_graded_once_and_listed_once(env):
     assert mine[0]["recordings_count"] == 3 and mine[0]["total_duration_seconds"] == 60
 
     res = await c.post(f"{API}/admin/speaking-tests/submissions/{mine[0]['submission_id']}/result",
-                       headers=h, json={"overall_raw": 24, "comment": "ok"})
+                       headers=h, json={"overall_raw": 19, "comment": "ok"})
     assert res.status_code == 200, res.text
 
     async with dbm.AsyncSessionLocal() as s:

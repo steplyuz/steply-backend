@@ -159,8 +159,11 @@ def validate_evaluation(raw: Any, spec: TaskSpec | int) -> dict[str, Any]:
     """Validate both the current holistic score and the legacy dual-rubric contract."""
     import copy
 
-    if isinstance(spec, int) or (isinstance(raw, dict) and "overall" in raw):
-        max_raw = int(spec) if isinstance(spec, int) else 24
+    # Eski (legacy) ikki-rubrikali kontrakt faqat spec o'rniga int max_raw berilganda ishlatiladi.
+    # 2025 topshiriqlari (TaskSpec) uchun javob doim 2025 sxemasiga (score, feedback) mos bo'lishi shart:
+    # aks holda "overall" kaliti bilan kelgan javob o'tib ketib, keyin score yo'qligi uchun 500 beradi.
+    if isinstance(spec, int):
+        max_raw = int(spec)
         if not isinstance(raw, dict):
             raise ValueError("AI javobi obyekt bo‘lishi kerak")
         data = copy.deepcopy(raw)

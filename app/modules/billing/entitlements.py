@@ -38,14 +38,18 @@ def tier_allows_skill(tier: SubscriptionTier, skill: str) -> bool:
 
 
 async def plan_allows_skill(db: AsyncSession, user_id, skill: str) -> bool:
-    sub = await get_active_subscription(db, user_id)
-    if not sub:
+    """Barcha faol obunalar ko'nikmalarining birlashmasi (obunalar qo'shiladi)."""
+    subs = await get_active_subscriptions(db, user_id)
+    if not subs:
         return skill in TIER_SKILLS[SubscriptionTier.FREE]
-    plan = await db.get(SubscriptionPlan, sub.plan_id)
-    if not plan:
-        return False
-    configured = getattr(plan, "included_skills", None)
-    return skill in (configured or TIER_SKILLS.get(plan.tier, frozenset()))
+    for sub in subs:
+        plan = await db.get(SubscriptionPlan, sub.plan_id)
+        if plan is None:
+            continue
+        configured = getattr(plan, "included_skills", None)
+        if skill in (configured or TIER_SKILLS.get(plan.tier, frozenset())):
+            return True
+    return False
 
 
 def _month_start(now: Optional[datetime] = None) -> date:
@@ -93,6 +97,22 @@ async def get_active_subscription(db: AsyncSession, user_id):
             .limit(1)
         )
     ).scalars().first()
+
+
+async def get_active_subscriptions(db: AsyncSession, user_id) -> list[UserSubscription]:
+    """Hozir faol BARCHA obunalar (bir nechta tarif bir vaqtda bo'lishi mumkin)."""
+    now = datetime.now(timezone.utc)
+    rows = await db.execute(
+        select(UserSubscription)
+        .where(
+            UserSubscription.user_id == user_id,
+            UserSubscription.is_active.is_(True),
+            UserSubscription.start_date <= now,
+            UserSubscription.end_date > now,
+        )
+        .order_by(UserSubscription.end_date.desc())
+    )
+    return list(rows.scalars().all())
 
 
 async def get_user_tier(db: AsyncSession, user_id) -> SubscriptionTier:
@@ -190,42 +210,28 @@ async def enforce_practice_limit(
 
 
 async def get_ai_quota(db: AsyncSession, user_id) -> dict:
-    """Writing AI: alohida oylik obuna kvotasi + xarid qilingan kreditlar."""
-    from .models import WritingAICreditGrant, WritingAIUsage
-    sub = await get_active_subscription(db, user_id)
+    """Umumiy AI kreditlar (Writing + Speaking): oylik obuna kvotasi + xarid qilingan kreditlar."""
+    from .models import AICreditGrant, AIUsage
+    subs = await get_active_subscriptions(db, user_id)
     tier = SubscriptionTier.FREE
     limit = 0
-    if sub:
+    for sub in subs:
         plan = await db.get(SubscriptionPlan, sub.plan_id)
-        if plan:
-            tier = plan.tier
-            limit = int(plan.ai_limit or 0) if bool(getattr(plan, "ai_enabled", False)) else 0
-    from app.modules.tests.writing.models import FeedbackSource, WritingAnswer, WritingFeedback, WritingResult
+        if plan is None:
+            continue
+        tier = plan.tier
+        if bool(getattr(plan, "ai_enabled", False)):
+            limit += int(plan.ai_limit or 0)
     month_start = _month_start_utc()
-    # New provider evaluations have an explicit billing-source ledger. Legacy AI
-    # feedback without a ledger row counts against subscription quota for compatibility;
-    # deterministic zero-score feedback (model_name=None) did not call the provider.
-    ledger_used = int((await db.scalar(select(func.count(WritingAIUsage.id)).where(
-        WritingAIUsage.user_id == user_id,
-        WritingAIUsage.billing_source == "subscription",
-        WritingAIUsage.created_at >= month_start,
+    # Barcha AI sarfi (Writing + Speaking) bitta ledger'dan: faqat obuna limitidan yechilganlari.
+    used = int((await db.scalar(select(func.count(AIUsage.id)).where(
+        AIUsage.user_id == user_id,
+        AIUsage.billing_source == "subscription",
+        AIUsage.created_at >= month_start,
     ))) or 0)
-    legacy_used = int((await db.execute(
-        select(func.count()).select_from(WritingFeedback)
-        .join(WritingAnswer, WritingAnswer.id == WritingFeedback.answer_id)
-        .join(WritingResult, WritingResult.id == WritingAnswer.result_id)
-        .outerjoin(WritingAIUsage, WritingAIUsage.answer_id == WritingAnswer.id)
-        .where(WritingResult.user_id == user_id,
-               WritingFeedback.source == FeedbackSource.AI,
-               WritingFeedback.created_at >= month_start,
-               WritingFeedback.model_name.is_not(None),
-               func.trim(WritingAnswer.content) != "",
-               WritingAIUsage.id.is_(None))
-    )).scalar_one() or 0)
-    used = ledger_used + legacy_used
-    purchased = int((await db.scalar(select(func.coalesce(func.sum(WritingAICreditGrant.credits_remaining), 0)).where(
-        WritingAICreditGrant.user_id == user_id,
-        WritingAICreditGrant.credits_remaining > 0,
+    purchased = int((await db.scalar(select(func.coalesce(func.sum(AICreditGrant.credits_remaining), 0)).where(
+        AICreditGrant.user_id == user_id,
+        AICreditGrant.credits_remaining > 0,
     ))) or 0)
     subscription_remaining = max(0, limit - used)
     return {
@@ -238,13 +244,13 @@ async def get_ai_quota(db: AsyncSession, user_id) -> dict:
     }
 
 
-async def enforce_ai_quota(db: AsyncSession, user_id, units: int = 1) -> int:
+async def enforce_ai_quota(db: AsyncSession, user_id, units: int = 1, feature: str = "AI") -> int:
     """Tekshiradi va oylik kvotadan ortgan qismini xarid kreditlaridan atomar band qiladi.
 
     Qaytgan son — xarid qilingan kreditlardan band qilingan birlik. Caller provider xatosida
     tranzaksiyani rollback qilishi kerak; muvaffaqiyatli Writing service commit'i bandni saqlaydi.
     """
-    from .models import WritingAICreditGrant
+    from .models import AICreditGrant
     units = max(1, int(units))
     # Serialize quota reservations across different Writing results for this user.
     await db.execute(update(User).where(User.id == user_id).values(updated_at=User.updated_at))
@@ -254,16 +260,16 @@ async def enforce_ai_quota(db: AsyncSession, user_id, units: int = 1) -> int:
     if purchased_needed <= 0:
         return 0
     grants = (await db.execute(
-        select(WritingAICreditGrant).where(
-            WritingAICreditGrant.user_id == user_id,
-            WritingAICreditGrant.credits_remaining > 0,
-        ).order_by(WritingAICreditGrant.created_at, WritingAICreditGrant.id).with_for_update()
+        select(AICreditGrant).where(
+            AICreditGrant.user_id == user_id,
+            AICreditGrant.credits_remaining > 0,
+        ).order_by(AICreditGrant.created_at, AICreditGrant.id).with_for_update()
     )).scalars().all()
     available = sum(g.credits_remaining for g in grants)
     if available < purchased_needed:
         if quota["subscription_remaining"] == 0 and available == 0:
-            raise HTTPException(429, "Writing AI limiti tugadi. Billing sahifasidan qo‘shimcha AI kredit sotib oling.")
-        raise HTTPException(429, f"Writing AI uchun {units} kredit kerak; faqat {quota['subscription_remaining'] + available} ta qoldi")
+            raise HTTPException(429, f"AI kreditlari tugadi ({feature}). Billing sahifasidan qo‘shimcha AI kredit sotib oling.")
+        raise HTTPException(429, f"{feature} uchun {units} AI kredit kerak; faqat {quota['subscription_remaining'] + available} ta qoldi")
     remaining = purchased_needed
     for grant in grants:
         if remaining <= 0:
@@ -273,6 +279,40 @@ async def enforce_ai_quota(db: AsyncSession, user_id, units: int = 1) -> int:
         remaining -= take
     await db.flush()
     return purchased_needed
+
+
+async def refund_purchased_ai_units(db: AsyncSession, user_id, units: int) -> None:
+    """Sotib olingan kreditdan yechilgan birliklarni qaytaradi (xato bo'lgan baholash uchun)."""
+    from .models import AICreditGrant
+    remaining = max(0, int(units))
+    if remaining <= 0:
+        return
+    grants = (await db.execute(
+        select(AICreditGrant).where(AICreditGrant.user_id == user_id)
+        .order_by(AICreditGrant.created_at.desc(), AICreditGrant.id.desc()).with_for_update()
+    )).scalars().all()
+    for grant in grants:
+        if remaining <= 0:
+            break
+        room = grant.credits_total - grant.credits_remaining
+        if room <= 0:
+            continue
+        give = min(room, remaining)
+        grant.credits_remaining += give
+        remaining -= give
+    await db.flush()
+
+
+async def release_speaking_usage(db: AsyncSession, job_id: int) -> None:
+    """Speaking baholash xato bilan tugasa: ledger qatorini o'chiradi, sotib olingan kreditni qaytaradi."""
+    from .models import AIUsage
+    row = (await db.execute(select(AIUsage).where(AIUsage.job_id == job_id, AIUsage.feature == "speaking"))).scalar_one_or_none()
+    if row is None:
+        return
+    if row.purchased_units:
+        await refund_purchased_ai_units(db, row.user_id, row.purchased_units)
+    await db.delete(row)
+    await db.flush()
 
 
 async def get_remaining_limits(db: AsyncSession, user_id) -> dict:

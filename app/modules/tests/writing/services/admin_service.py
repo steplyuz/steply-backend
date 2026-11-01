@@ -296,6 +296,75 @@ class WritingAdminService:
     # DELETE
     # ==========================================================
 
+    # ==========================================================
+    # PER-TASK (topshiriqni alohida tahrirlash / qo'shish)
+    # ==========================================================
+
+    @staticmethod
+    def _task_values(t) -> dict:
+        wl = t.word_limit
+        return dict(
+            part_number=t.part_number,
+            sub_part=t.sub_part,
+            topic=t.topic,
+            instruction=t.instruction,
+            context_text=t.context_text,
+            question=t.question,
+            word_limit_min=(wl if isinstance(wl, int) else (wl.min if wl else None)),
+            word_limit_max=(wl if isinstance(wl, int) else (wl.max if wl else None)),
+            format_id=t.format_id,
+        )
+
+    async def _assert_task_editable(self, exam_id: str) -> None:
+        await ContentLockService(self.db, PaperModule.WRITING, exam_id).assert_unlocked("Writing test")
+        if await self._has_results(exam_id):
+            raise HTTPException(400, "Cannot update exam with existing submissions")
+        await self._get_exam_or_404(exam_id)
+
+    async def _ensure_unique_structure(self, exam_id: str) -> None:
+        keys = (await self.db.execute(
+            select(WritingTask.part_number, WritingTask.sub_part).where(WritingTask.exam_id == exam_id)
+        )).all()
+        seen = set()
+        for key in keys:
+            key = tuple(key)
+            if key in seen:
+                await self.db.rollback()
+                raise HTTPException(422, "Bir xil qism/sub-part ikki marta uchrayapti (Duplicate task structure)")
+            seen.add(key)
+
+    async def upsert_task(self, exam_id: str, task_id: int, data) -> WritingExam:
+        """Bitta topshiriqni (id bo'yicha) tahrirlaydi; boshqa topshiriqlarga tegmaydi."""
+        await self._assert_task_editable(exam_id)
+        await self._validate_formats([data])
+        task = (await self.db.execute(
+            select(WritingTask).where(WritingTask.exam_id == exam_id, WritingTask.id == task_id)
+        )).scalar_one_or_none()
+        if task is None:
+            raise HTTPException(404, "Topshiriq topilmadi")
+        for field, value in self._task_values(data).items():
+            setattr(task, field, value)
+        await self.db.flush()
+        await self._ensure_unique_structure(exam_id)
+        await self.db.commit()
+        return await self.get_exam_by_id(exam_id)
+
+    async def add_task(self, exam_id: str, data) -> WritingExam:
+        """Imtihonga yangi topshiriq qo'shadi (mavjud topshiriqlar o'zgarmaydi)."""
+        await self._assert_task_editable(exam_id)
+        await self._validate_formats([data])
+        existing = (await self.db.execute(
+            select(WritingTask.external_id).where(WritingTask.exam_id == exam_id)
+        )).scalars().all()
+        ext = data.external_id or f"task-{len(existing) + 1}"
+        if ext in existing:
+            raise HTTPException(409, f"external_id '{ext}' allaqachon mavjud")
+        self.db.add(WritingTask(exam_id=exam_id, external_id=ext, **self._task_values(data)))
+        await self.db.flush()
+        await self._ensure_unique_structure(exam_id)
+        await self.db.commit()
+        return await self.get_exam_by_id(exam_id)
+
     async def delete_exam(self, exam_id: str, force: bool = False):
         # Qoida Reading/Listening/Speaking bilan bir xil (exams/mock/usage.py):
         # mock imtihon / OMR -> doim 409; natija yoki urinish -> 409, faqat force (SUPER_ADMIN) bilan o'chadi.

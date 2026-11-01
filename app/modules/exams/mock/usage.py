@@ -122,12 +122,8 @@ async def ensure_deletable(
             409,
             "Bu test versiyasi bo'yicha skanerlangan OMR javoblari bor, o'chirib bo'lmaydi.",
         )
-    if usage.has_history and not force:
-        raise HTTPException(
-            409,
-            "Bu testda topshirilgan natijalar yoki urinishlar bor. Uni faolsizlantiring "
-            "(is_active=false), yoki super admin bo'lsangiz force=true bilan majburiy o'chiring.",
-        )
+    # Natijalar va urinishlar endi test bilan birga o'chadi (chaqiruvchi purge_* qiladi).
+    # Mock imtihon va OMR bog'liqligi yuqorida baribir 409 qaytaradi.
     return usage
 
 

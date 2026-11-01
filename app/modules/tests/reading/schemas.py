@@ -94,7 +94,6 @@ class ReadingTestResponse(ReadingTestBase):
     id: str
     created_at: datetime
     parent_test_id: Optional[str] = None
-    source_part_id: Optional[int] = None
     practice_part_number: Optional[int] = None
     parts: List[ReadingPartResponse]
 

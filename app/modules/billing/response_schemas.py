@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .models import BillingOrderStatus, BillingProductType, SubscriptionTier
 
@@ -59,6 +59,7 @@ class PromoCodePublic(BaseModel):
     discount_amount: Optional[int] = None
     max_usage: Optional[int] = None
     used_count: int
+    activates_plan_id: Optional[int] = None
     valid_from: Optional[datetime] = None
     valid_until: Optional[datetime] = None
     is_active: bool
@@ -79,6 +80,10 @@ class OrderPublic(BaseModel):
     discount_amount: int
     promo_code_id: Optional[int] = None
     status: BillingOrderStatus
+    # inPAY to'lov sahifasi (onlayn to'lov buyurtmalari uchun). Frontend shu manzilga yo'naltiradi.
+    checkout_url: Optional[str] = Field(default=None, validation_alias="provider_checkout_url")
+    # To'lov provayderi: 'inpay' yoki None (manual to'lov).
+    payment_provider: Optional[str] = None
     user_note: Optional[str] = None
     admin_note: Optional[str] = None
     reviewed_by: Optional[UUID] = None

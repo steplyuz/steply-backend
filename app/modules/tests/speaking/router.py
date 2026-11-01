@@ -11,6 +11,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.errors import AppError
+from fastapi import BackgroundTasks
+from app.core.config import settings
+from app.modules.tests.speaking import ai_service
+from app.modules.tests.scoring_policy import cefr_for_score
+from app.modules.tests.speaking.scoring import speaking_raw_from_parts, speaking_scaled_from_parts
 from app.core.database import get_db
 from app.core.file_storage import PRIVATE_ROOT as _PRIVATE_ROOT, ensure_private_file
 from fastapi.responses import FileResponse
@@ -27,10 +32,14 @@ from app.modules.tests.speaking.schemas import (
     SpeakingTestListItem,
     SpeakingTestResponse,
     SpeakingTestUpdate,
+    SpeakingPart11Create,
+    SpeakingPart12Create,
+    SpeakingPart2Create,
+    SpeakingPart3Create,
     SpeakingRecordingDraftResponse,
     SpeakingAttemptPendingResponse,
 )
-from app.modules.tests.speaking.services import SpeakingService
+from app.modules.tests.speaking.services import SpeakingService, _safe_remove
 from app.modules.exams.paper.schemas import LockResultResponse
 
 MAX_JSON_BYTES = 10 * 1024 * 1024
@@ -189,6 +198,37 @@ async def update_speaking_test(
     return await service.update_test(test_id, data)
 
 
+# Qism kodi -> (SpeakingTestUpdate maydoni, qism sxemasi). Partlar alohida tahrirlanadi.
+SPEAKING_PART_FIELDS = {
+    "1.1": ("part_1_1", SpeakingPart11Create),
+    "1.2": ("part_1_2", SpeakingPart12Create),
+    "2": ("part_2", SpeakingPart2Create),
+    "3": ("part_3", SpeakingPart3Create),
+}
+
+
+@admin_router.put(
+    "/{test_id}/parts/{part_code}",
+    response_model=SpeakingTestResponse,
+    summary="Speaking testning bitta qismini tahrirlash (1.1 | 1.2 | 2 | 3)",
+)
+async def update_speaking_test_part(
+    test_id: str,
+    part_code: str,
+    body: dict,
+    service: SpeakingService = Depends(get_service),
+):
+    """Faqat shu qismni yangilaydi; boshqa qismlar o'zgarmaydi. Audio yozuvi bor bo'lsa 409 (service qoidasi)."""
+    if part_code not in SPEAKING_PART_FIELDS:
+        raise HTTPException(404, "Noma'lum qism. 1.1, 1.2, 2 yoki 3 bo'lishi kerak")
+    field, schema = SPEAKING_PART_FIELDS[part_code]
+    try:
+        part = schema.model_validate(body)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(422, f"Qism ma'lumoti noto'g'ri: {str(exc)[:300]}")
+    return await service.update_test(test_id, SpeakingTestUpdate(**{field: part}))
+
+
 @admin_router.post("/{test_id}/unlock", summary="Speaking testni lock'dan chiqarish (LOCK OFF)")
 async def unlock_speaking_test(
     test_id: str,
@@ -308,11 +348,57 @@ async def submit_practice_speaking(
         # Speaking audio topshirish tarifdan mustaqil. Baholash huquqi
         # alohida tekshiriladi; shu sabab bu yerda tarif/quota bilan bloklamaymiz.
         await db.flush()
-    return await service.upload_submission(
+    # AI baholash boshlangan urinishga yangi yozuv qo'shilmaydi.
+    from app.modules.tests.speaking.ai_models import SpeakingAIJob
+    if await db.scalar(select(SpeakingAIJob.id).where(SpeakingAIJob.practice_attempt_id == attempt.id)) is not None:
+        raise HTTPException(409, "Bu urinish baholashga yuborilgan; yangi yozuv qabul qilinmaydi")
+    # Qayta yozish: shu urinish + savol uchun eski (baholanmagan) yozuv almashtiriladi.
+    from app.modules.tests.speaking.models import SpeakingSubmission
+    from app.core.file_storage import private_path
+    previous = (await db.execute(select(SpeakingSubmission).where(
+        SpeakingSubmission.practice_attempt_id == attempt.id,
+        SpeakingSubmission.part_external_id == part_external_id,
+        SpeakingSubmission.question_external_id == question_external_id,
+    ))).scalars().all()
+    old_paths: list[str] = []
+    for row in previous:
+        if row.status == "checked":
+            raise HTTPException(409, "Bu savol allaqachon baholangan; qayta yozib bo'lmaydi")
+        if row.audio_storage_key:
+            old_paths.append(str(private_path("speaking", "submissions", row.audio_storage_key)))
+        await db.delete(row)
+    if previous:
+        await db.flush()
+    submission = await service.upload_submission(
         current_user.id, speaking_test_id, file,
         mock_skill_attempt_id=None, practice_attempt_id=attempt.id,
         question_external_id=question_external_id, part_external_id=part_external_id,
     )
+    for path in old_paths:
+        _safe_remove(path)
+    return submission
+
+
+@router.post("/practice/attempts/{attempt_id}/finish", summary="Speaking practice urinishini yakunlash")
+async def finish_practice_attempt(
+    attempt_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Talaba testni tugatganda chaqiriladi: urinish SUBMITTED bo'ladi, keyingi topshiriq yangi urinishda boshlanadi."""
+    from datetime import datetime, timezone
+    from app.modules.exams.mock.models import PracticeAttempt, PracticeAttemptStatus, SkillType
+    from app.modules.tests.attempts.timer import transition_practice_attempt
+
+    attempt = await db.get(PracticeAttempt, attempt_id)
+    if attempt is None or attempt.user_id != current_user.id or attempt.skill != SkillType.SPEAKING:
+        raise HTTPException(404, "Urinish topilmadi")
+    if attempt.status == PracticeAttemptStatus.IN_PROGRESS:
+        transition_practice_attempt(attempt, PracticeAttemptStatus.SUBMITTED)
+        attempt.submitted_at = datetime.now(timezone.utc)
+        attempt.active_scope_key = None
+        await db.commit()
+    return {"attempt_id": attempt.id, "status": getattr(attempt.status, "value", attempt.status)}
 
 
 @router.get("/practice/{test_id}/paper.pdf", summary="Speaking test savollarini PDF yuklab olish")
@@ -463,3 +549,51 @@ async def submit_speaking_result(
         raise HTTPException(403, "Faqat Admin, Super Admin yoki Teacher baholay oladi.")
 
     return await service.submit_result(submission_id, current_user.id, data)
+
+
+@router.post("/practice/attempts/{attempt_id}/ai-evaluation", status_code=202)
+async def request_ai_evaluation(
+    attempt_id: int,
+    background: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    if not settings.SPEAKING_AI_ENABLED:
+        raise HTTPException(503, "Speaking AI baholash hozircha yoqilmagan")
+    job, created = await ai_service.start_job(db, current_user.id, attempt_id)
+    if created:
+        background.add_task(ai_service.run_job, job.id)
+    return {"job_id": job.id, "status": job.status}
+
+
+@router.get("/practice/attempts/{attempt_id}/ai-evaluation")
+async def get_ai_evaluation(
+    attempt_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    job = await ai_service.get_job(db, current_user.id, attempt_id)
+    parts_map = {e.part: (e.score, e.max_score) for e in job.evaluations}
+    raw = speaking_raw_from_parts(parts_map)
+    scaled = speaking_scaled_from_parts(parts_map)
+    overall = None
+    if raw is not None and scaled is not None:
+        overall = {"raw": raw, "scaled": scaled, "cefr": cefr_for_score(scaled)}
+    return {
+        "attempt_id": attempt_id,
+        "status": job.status,
+        "error": job.error if job.status == "failed" else None,
+        "overall": overall,
+        "parts": [
+            {
+                "part": e.part,
+                "score": e.score,
+                "max": e.max_score,
+                "level": e.level,
+                "questions": e.payload.get("questions", []),
+                "feedback_uz": e.payload.get("feedback_uz", ""),
+            }
+            for e in sorted(job.evaluations, key=lambda e: e.part)
+        ],
+        "pronunciation": "not_assessed",
+    }

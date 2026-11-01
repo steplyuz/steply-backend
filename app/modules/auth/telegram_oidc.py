@@ -35,6 +35,8 @@ from app.modules.auth.service import AuthService
 logger = logging.getLogger(__name__)
 
 OIDC_ISSUER = "https://oauth.telegram.org"
+OIDC_DISCOVERY_URL = f"{OIDC_ISSUER}/.well-known/openid-configuration"
+OIDC_SCOPE = "openid profile phone"
 STATE_COOKIE = "telegram_oidc_browser"
 STATE_COOKIE_PATH = "/api/v1/auth/telegram"
 # Popup (telegram-login.js) flow has no authorization code, so no PKCE verifier.
@@ -93,7 +95,7 @@ class TelegramOIDCProvider:
             async with httpx.AsyncClient(
                 timeout=settings.TELEGRAM_OIDC_HTTP_TIMEOUT_SECONDS
             ) as client:
-                response = await client.get(settings.TELEGRAM_OIDC_DISCOVERY_URL)
+                response = await client.get(OIDC_DISCOVERY_URL)
                 response.raise_for_status()
                 metadata = response.json()
         except (httpx.HTTPError, ValueError) as exc:
@@ -159,7 +161,7 @@ class TelegramOIDCProvider:
                     "client_id": settings.TELEGRAM_CLIENT_ID,
                     "redirect_uri": settings.TELEGRAM_REDIRECT_URI,
                     "response_type": "code",
-                    "scope": settings.TELEGRAM_OIDC_SCOPE,
+                    "scope": OIDC_SCOPE,
                     "state": state,
                     "nonce": nonce,
                     "code_challenge": code_challenge,
@@ -687,6 +689,86 @@ class TelegramOIDCService:
                 raise HTTPException(409, "Telegram account could not be linked")
             return await self.auth._get_user_full(identity.user_id)
 
+        return user
+
+    async def _consume_popup_nonce(self, request: Request, response) -> str:
+        """Popup oqimining bir martalik nonce'ini sarflaydi (verify_popup bilan bir xil qoida)."""
+        browser_secret = request.cookies.get(STATE_COOKIE)
+        if not browser_secret:
+            self._clear_state_cookie(response)
+            raise HTTPException(400, "Telegram authentication failed")
+
+        tx = (
+            await self.db.execute(
+                select(TelegramOIDCTransaction).where(
+                    TelegramOIDCTransaction.browser_secret_hash == _sha256(browser_secret)
+                )
+            )
+        ).scalar_one_or_none()
+        if tx is None or tx.used_at is not None or tx.expires_at.replace(tzinfo=timezone.utc) <= _now():
+            self._clear_state_cookie(response)
+            raise HTTPException(400, "Telegram authentication failed")
+
+        nonce = _decrypt(tx.nonce_encrypted)
+        consumed = await self.db.execute(
+            update(TelegramOIDCTransaction)
+            .where(
+                TelegramOIDCTransaction.id == tx.id,
+                TelegramOIDCTransaction.used_at.is_(None),
+            )
+            .values(used_at=_now())
+            .execution_options(synchronize_session=False)
+        )
+        if consumed.rowcount != 1:
+            self._clear_state_cookie(response)
+            raise HTTPException(400, "Telegram authentication failed")
+        # Nonce sarflanganini darhol saqlaymiz: keyingi xatoda rollback bo'lsa ham qayta ishlatilmaydi.
+        await self.db.commit()
+        return nonce
+
+    async def link_popup(self, *, user: User, request: Request, response, id_token: str) -> User:
+        """Hozir kirgan akkauntga Telegram'ni bog'laydi. Yangi sessiya ochmaydi."""
+        nonce = await self._consume_popup_nonce(request, response)
+        claims = await provider.validate_id_token(id_token, expected_nonce=nonce)
+        self._clear_state_cookie(response)
+
+        sub = str(claims["sub"])
+        numeric_id = _telegram_numeric_id(claims)
+
+        # Bir akkauntga bitta Telegram (va bitta Google) bog'lanadi.
+        already = (await self.db.execute(
+            select(Identity.provider_user_id).where(
+                Identity.user_id == user.id, Identity.provider == "telegram"
+            )
+        )).scalars().first()
+        if already is not None:
+            if already == sub:
+                return user
+            raise HTTPException(409, "Bu akkauntga boshqa Telegram allaqachon bog'langan")
+
+        identity_owner = (await self.db.execute(
+            select(Identity.user_id).where(
+                Identity.provider == "telegram", Identity.provider_user_id == sub
+            )
+        )).scalar_one_or_none()
+        if identity_owner is not None:
+            raise HTTPException(409, "Bu Telegram akkaunti boshqa foydalanuvchiga bog'langan")
+
+        if numeric_id is not None:
+            numeric_owner = (await self.db.execute(
+                select(User.id).where(User.telegram_user_id == numeric_id)
+            )).scalar_one_or_none()
+            if numeric_owner is not None and numeric_owner != user.id:
+                raise HTTPException(409, "Bu Telegram akkaunti boshqa foydalanuvchiga bog'langan")
+            if user.telegram_user_id is None:
+                user.telegram_user_id = numeric_id
+
+        try:
+            async with self.db.begin_nested():
+                self.db.add(Identity(user_id=user.id, provider="telegram", provider_user_id=sub))
+                await self.db.flush()
+        except IntegrityError as exc:
+            raise HTTPException(409, "Telegram akkaunti bog'lanmadi, qayta urinib ko'ring") from exc
         return user
 
     @staticmethod

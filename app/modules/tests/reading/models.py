@@ -5,7 +5,7 @@ from sqlalchemy import Enum, ForeignKey, Integer, JSON, String, Text, UniqueCons
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.core.mixins import ExamFlagsMixin, ExamIdMixin, ResultBaseMixin, TimestampMixin
+from app.core.mixins import ExamCommonMixin, ExamFlagsMixin, ExamIdMixin, ResultBaseMixin, TimestampMixin
 
 
 class ReadingQuestionType(str, enum.Enum):
@@ -18,25 +18,17 @@ class ReadingQuestionType(str, enum.Enum):
     MULTIPLE_SELECT = "MULTIPLE_SELECT"
 
 
-class ReadingTest(Base, ExamIdMixin, ExamFlagsMixin, TimestampMixin):
+class ReadingTest(Base, ExamIdMixin, ExamFlagsMixin, ExamCommonMixin, TimestampMixin):
     """PAPER 2: READING — 5 qism, 35 savol, 1 soat (rasmiy DTM formati)."""
 
     __tablename__ = "reading_tests"
 
-    title: Mapped[str] = mapped_column(String, nullable=False)
     cefr_level: Mapped[str] = mapped_column(String, nullable=False)
     language: Mapped[str] = mapped_column(String, default="en")
     duration_minutes: Mapped[int] = mapped_column(Integer, default=60)
     total_questions: Mapped[int] = mapped_column(Integer, nullable=False)
 
-    # Part mini-test source metadata. NULL for ordinary/full Reading tests.
-    parent_test_id: Mapped[Optional[str]] = mapped_column(
-        String(64), ForeignKey("reading_tests.id", ondelete="SET NULL", name="fk_reading_tests_parent_test_id"), nullable=True, index=True
-    )
-    source_part_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("reading_parts.id", ondelete="CASCADE", name="fk_reading_tests_source_part_id"), nullable=True, index=True
-    )
-    practice_part_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Part mini-test: parent_test_id va practice_part_number umumiy ExamCommonMixin da.
 
     parts: Mapped[List["ReadingPart"]] = relationship(
         back_populates="test",
@@ -48,11 +40,11 @@ class ReadingTest(Base, ExamIdMixin, ExamFlagsMixin, TimestampMixin):
         back_populates="test", cascade="all, delete-orphan"
     )
     parent_test: Mapped[Optional["ReadingTest"]] = relationship(
-        remote_side="ReadingTest.id", foreign_keys=[parent_test_id], uselist=False
+        remote_side="ReadingTest.id", foreign_keys="[ReadingTest.parent_test_id]", uselist=False
     )
 
     __table_args__ = (
-        UniqueConstraint("parent_test_id", "source_part_id", name="uq_reading_mini_test_source_part"),
+        UniqueConstraint("parent_test_id", "practice_part_number", name="uq_reading_mini_test_part_number"),
     )
 
 
@@ -86,7 +78,7 @@ class ReadingQuestion(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     part_id: Mapped[int] = mapped_column(
-        ForeignKey("reading_parts.id", ondelete="CASCADE", name="fk_reading_tests_source_part_id"), nullable=False
+        ForeignKey("reading_parts.id", ondelete="CASCADE"), nullable=False
     )
 
     external_id: Mapped[Optional[str]] = mapped_column(String(128), nullable=True, index=True)

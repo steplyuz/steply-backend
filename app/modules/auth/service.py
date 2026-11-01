@@ -1,3 +1,4 @@
+import logging
 import secrets
 import hashlib
 import hmac
@@ -5,6 +6,7 @@ import json
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
+
 
 from fastapi import HTTPException, Request
 from sqlalchemy import select, and_, update
@@ -50,6 +52,7 @@ from app.core.refresh_rotation import (
 import functools
 from cryptography.fernet import Fernet, InvalidToken
 
+logger = logging.getLogger(__name__)
 
 _INVALID_LOGIN = "Telefon yoki parol noto'g'ri"
 _LOGIN_LOCKED = "Juda ko'p noto'g'ri urinish. Keyinroq qayta urinib ko'ring"
@@ -58,7 +61,7 @@ _LOGIN_PAIR = FailureThrottle("login-pair", max_failures=5, window_seconds=15 * 
 # Telefon bo'yicha umumiy chegara: taqsimlangan brute-force'ga qarshi. Bu egasini
 # vaqtincha qulflashi mumkin (DoS xavfi); CAPTCHA (5-bosqich) buni kamaytiradi.
 _LOGIN_PHONE = FailureThrottle("login-phone", max_failures=20, window_seconds=15 * 60)
-_REGISTER_SENT_MESSAGE = "SMS kodi yuborildi. Telegram bot orqali kodni olish mumkin."
+_REGISTER_SENT_MESSAGE = "Tasdiqlash kodini SMS orqali yoki Telegram bot orqali olishingiz mumkin."
 
 
 @functools.lru_cache(maxsize=1)
@@ -88,7 +91,10 @@ class AuthService:
     # Kodni tasdiqlashda noto'g'ri urinishlar limiti
     OTP_MAX_VERIFY_ATTEMPTS = 5
     # Telegram orqali /start bosilishini kutish vaqti (link amal qilish muddati)
-    BOT_LINK_EXPIRE_MINUTES = 10
+    # Ro'yxatdan o'tish oynasi (SMS kodi + bot havolasi). Bot bilan har bir muloqotda
+    # sirpanuvchi ravishda uzaytiriladi (_extend_bot_window), shuning uchun foydalanuvchi
+    # sekin harakat qilsa ham havola "eskirgan" bo'lib qolmaydi.
+    BOT_LINK_EXPIRE_MINUTES = 15
     # Refresh tokenni qayta ishlatish (parallel tab) uchun imtiyozli oyna: shu vaqt ichida
     # eski token rad etiladi, lekin butun sessiya oilasi o'chirilmaydi.
 
@@ -214,6 +220,31 @@ class AuthService:
     # REGISTER — 1-QADAM: ma'lumotlarni qabul qilish + kod yuborish
     # =====================================================
 
+    async def _create_decoy_bot_link(self) -> str:
+        """Mavjud raqam uchun yolg'on bot havolasi.
+
+        Havola bo'sh (eskirgan) bo'lsa, bot "muddati tugagan" deydi va ro'yxatdan o'tgan
+        raqamlar oshkor bo'ladi. Shu sababli yolg'on havola ham haqiqiy oqimdek ishlaydi
+        (start -> kontakt), lekin yozuvning target'i haqiqiy raqam emas, shuning uchun
+        kontakt bosqichi hech qachon o'tmaydi va kod hech qachon berilmaydi.
+        """
+        raw = secrets.token_urlsafe(32)
+        now = datetime.now(timezone.utc)
+        self.db.add(VerificationCode(
+            target=f"decoy:{secrets.token_hex(8)}",
+            purpose=OtpPurpose.REGISTER,
+            channel=OtpChannel.SMS,
+            code_hash=None,
+            code_encrypted=None,
+            expires_at=now + timedelta(minutes=self.BOT_LINK_EXPIRE_MINUTES),
+            last_sent_at=now,
+            bot_token=self._hash(raw),
+            payload=json.dumps({}),
+            is_used=False,
+        ))
+        await self.db.flush()
+        return TelegramService.build_start_link(raw)
+
     async def register(self, data: RegisterRequest, request: Request) -> RegisterInitResponse:
         from datetime import date as date_cls
 
@@ -242,8 +273,8 @@ class AuthService:
             return RegisterInitResponse(
                 status="pending_verification",
                 message=_REGISTER_SENT_MESSAGE,
-                expires_in_seconds=self.OTP_EXPIRE_MINUTES * 60,
-                bot_link=TelegramService.build_start_link(secrets.token_urlsafe(32)),
+                expires_in_seconds=self.BOT_LINK_EXPIRE_MINUTES * 60,
+                bot_link=await self._create_decoy_bot_link(),
             )
 
         payload = {
@@ -263,7 +294,7 @@ class AuthService:
         return RegisterInitResponse(
             status="pending_verification",
             message=_REGISTER_SENT_MESSAGE,
-            expires_in_seconds=self.OTP_EXPIRE_MINUTES * 60,
+            expires_in_seconds=self.BOT_LINK_EXPIRE_MINUTES * 60,
             bot_link=result.get("bot_link"),
         )
 
@@ -317,6 +348,18 @@ class AuthService:
         ).scalar_one_or_none()
         if existing_identity:
             raise HTTPException(409, "Bu Telegram akkaunti allaqachon ro'yxatdan o'tgan")
+
+        # Telegram OIDC orqali yaratilgan akkauntlar identity'ni `sub` bilan yozadi,
+        # lekin User.telegram_user_id (UNIQUE) ni ham to'ldiradi. Shuni tekshirmasak,
+        # INSERT IntegrityError berib umumiy "ziddiyat" xatosi chiqadi.
+        existing_tg_user = (await self.db.execute(
+            select(User.id).where(User.telegram_user_id == tg_id)
+        )).scalar_one_or_none()
+        if existing_tg_user is not None:
+            raise HTTPException(
+                409,
+                "Bu Telegram akkaunti allaqachon ro'yxatdan o'tgan. Telegram orqali kirib ko'ring",
+            )
 
         birth_date = date.fromisoformat(payload["birth_date"])
         gender = Gender(payload["gender"])
@@ -415,6 +458,9 @@ class AuthService:
         # Limit telefon+IP juftligi bo'yicha: begona IP egasini bloklay olmaydi.
         await self._consume_send_quota(phone, purpose, client_ip, now)
 
+        # REGISTER: bot oynasi bilan bir xil (kod ham, havola ham shu muddatda amal qiladi).
+        # Boshqa maqsadlar (parolni tiklash) uchun OTP_EXPIRE_MINUTES.
+        ttl = timedelta(minutes=self.BOT_LINK_EXPIRE_MINUTES if purpose == OtpPurpose.REGISTER else self.OTP_EXPIRE_MINUTES)
         code = str(secrets.randbelow(900000) + 100000)
         raw_bot_token = secrets.token_urlsafe(32) if purpose == OtpPurpose.REGISTER else None
         bot_token_hash = self._hash(raw_bot_token) if raw_bot_token else None
@@ -422,7 +468,7 @@ class AuthService:
         if active:
             record.code_hash = self._code_hash(code)
             record.code_encrypted = self._encrypt_otp(code) if purpose == OtpPurpose.REGISTER else None
-            record.expires_at = now + timedelta(minutes=self.OTP_EXPIRE_MINUTES)
+            record.expires_at = now + ttl
             record.failed_attempts = 0
             record.send_count += 1
             record.last_sent_at = now
@@ -438,7 +484,7 @@ class AuthService:
                 channel=OtpChannel.SMS,
                 code_hash=self._code_hash(code),
                 code_encrypted=self._encrypt_otp(code) if purpose == OtpPurpose.REGISTER else None,
-                expires_at=now + timedelta(minutes=self.OTP_EXPIRE_MINUTES),
+                expires_at=now + ttl,
                 failed_attempts=0,
                 send_count=1,
                 last_sent_at=now,
@@ -449,16 +495,41 @@ class AuthService:
             self.db.add(record)
         await self.db.flush()
 
-        if settings.is_production:
+        
+        if settings.is_production or settings.SMS_ENABLED:
+            logger.info("OTP SMS yuborish boshlandi")
             try:
                 await SmsService.send_otp(phone, code)
-            except Exception as exc:
-                raise HTTPException(502, "SMS yuborishda xatolik yuz berdi. Birozdan keyin qayta urinib ko'ring") from exc
+                logger.info("OTP SMS so'rovi muvaffaqiyatli yakunlandi")
+            except Exception:
+                logger.exception("OTP SMS yuborishda xatolik yuz berdi")
+                if purpose != OtpPurpose.REGISTER:
+                    raise HTTPException(
+                        status_code=502,
+                        detail=(
+                            "SMS yuborishda xatolik yuz berdi. "
+                            "Birozdan keyin qayta urinib ko'ring"
+                        ),
+                    ) from None
+                # REGISTER: xatoni yutamiz. Yozuv (kod va parol) bazada qoladi va
+                # foydalanuvchi kodni Telegram bot orqali oladi. Shu sababli
+                # HTTPException tashlanmaydi — aks holda rollback bo'lib, bot havolasi ham yo'qolardi.
+                logger.warning("REGISTER: SMS yuborilmadi, kod Telegram bot orqali beriladi")
+        else:
+            logger.warning("SMS_ENABLED=false: SMS yuborish o'tkazib yuborildi")
 
         result = {"status": "sent"}
         if raw_bot_token:
             result["bot_link"] = TelegramService.build_start_link(raw_bot_token)
         return result
+
+    def _extend_bot_window(self, record: VerificationCode) -> None:
+        """Bot bilan muloqotda (start, kontakt) oynani BOT_LINK_EXPIRE_MINUTES ga uzaytiradi.
+
+        Faqat amaldagi (muddati o'tmagan) yozuvga chaqiriladi, shuning uchun
+        muddat hech qachon qisqarmaydi.
+        """
+        record.expires_at = datetime.now(timezone.utc) + timedelta(minutes=self.BOT_LINK_EXPIRE_MINUTES)
 
     async def telegram_register_start(
         self, *, start_token: str, telegram_user_id: int, chat_id: str,
@@ -490,6 +561,7 @@ class AuthService:
         record.telegram_user_id = telegram_user_id
         record.telegram_chat_id = chat_id
         record.payload = json.dumps(payload)
+        self._extend_bot_window(record)
         await self.db.flush()
         return {"status": "ok", "requires_contact": True}
 
@@ -528,6 +600,7 @@ class AuthService:
         payload = json.loads(record.payload or "{}")
         payload["telegram_phone_verified"] = True
         record.payload = json.dumps(payload)
+        self._extend_bot_window(record)
         await self.db.flush()
         return {"status": "verified", "verified": True}
 
@@ -537,7 +610,7 @@ class AuthService:
             raise HTTPException(404, "Kod yaroqsiz yoki eskirgan")
         payload = json.loads(record.payload or "{}")
         if not payload.get("telegram_phone_verified"):
-            raise HTTPException(403, "Avval telefon raqamingizni tasdiqlang")
+            raise HTTPException(428, "Avval telefon raqamingizni tasdiqlang")
         if not record.code_encrypted:
             raise HTTPException(410, "Kod mavjud emas")
         return self._decrypt_otp(record.code_encrypted)
@@ -673,6 +746,34 @@ class AuthService:
     # =====================================================
     # FIRST-LOGIN / TEMPORARY PASSWORD CHANGE
     # =====================================================
+
+    async def set_password(self, user_id: uuid.UUID, new_password: str) -> None:
+        """Parolsiz (Google/Telegram orqali) akkauntga birinchi parolni o'rnatadi.
+
+        Parol allaqachon bor bo'lsa, eski parolni bilmasdan o'zgartirib bo'lmaydi —
+        bu uchun change_password ishlatiladi.
+        """
+        user = await self._get_user_full(user_id)
+        if user.hashed_password:
+            raise HTTPException(
+                400,
+                "Parol allaqachon o'rnatilgan. Uni o'zgartirish uchun joriy parolni kiriting",
+            )
+        user.hashed_password = hash_password(new_password)
+        user.force_password_change = False
+        await self.db.flush()
+
+    async def linked_accounts(self, user_id: uuid.UUID) -> dict:
+        user = await self._get_user_full(user_id)
+        providers = set((await self.db.execute(
+            select(Identity.provider).where(Identity.user_id == user_id)
+        )).scalars().all())
+        return {
+            "has_password": bool(user.hashed_password),
+            "has_phone": any(c.contact_type == ContactType.PHONE for c in user.contacts),
+            "telegram_linked": "telegram" in providers or user.telegram_user_id is not None,
+            "google_linked": "google" in providers,
+        }
 
     async def change_password(self, user_id: uuid.UUID, current_password: str, new_password: str) -> None:
         user = await self._get_user_full(user_id)

@@ -17,6 +17,7 @@ from app.modules.auth.schemas import (
     TelegramRegisterContactRequest, TelegramRegisterContactResponse,
     TelegramRegisterCodeRequest, TelegramRegisterCodeResponse,
     TelegramVerifyRequest, GoogleVerifyRequest,
+    SetPasswordRequest, LinkedAccountsResponse,
 )
 from app.modules.auth.service import AuthService
 from app.modules.auth.google_oidc import GoogleOIDCService
@@ -33,7 +34,7 @@ def get_service(db: AsyncSession = Depends(get_db)) -> AuthService:
 
 def set_auth_cookies(response: Response, token: Token) -> None:
     cookie_kwargs = dict(
-        httponly=settings.COOKIE_HTTPONLY,
+        httponly=True,
         secure=settings.COOKIE_SECURE,
         samesite=settings.COOKIE_SAMESITE,
         path="/",
@@ -250,3 +251,52 @@ async def logout(request: Request, response: Response, service: AuthService = De
         await service.logout(refresh_token)
     clear_auth_cookies(response)
     return StatusResponse(status="success", message="Chiqildi")
+
+
+# -----------------------------------------------------------------------------
+# Parolsiz (Google/Telegram) akkauntlar: birinchi parol va provayderlarni bog'lash
+# -----------------------------------------------------------------------------
+
+@router.post("/password/set", response_model=StatusResponse)
+async def set_password(
+    data: SetPasswordRequest,
+    current_user: User = Depends(get_current_user_allow_forced_change),
+    service: AuthService = Depends(get_service),
+):
+    await service.set_password(current_user.id, data.new_password)
+    return StatusResponse(status="success", message="Parol muvaffaqiyatli o'rnatildi")
+
+
+@router.get("/linked-accounts", response_model=LinkedAccountsResponse)
+async def linked_accounts(
+    current_user: User = Depends(get_current_user),
+    service: AuthService = Depends(get_service),
+):
+    return LinkedAccountsResponse(**await service.linked_accounts(current_user.id))
+
+
+# Bog'lash uchun nonce oldingidek: /auth/google/nonce va /auth/telegram/nonce.
+@router.post("/google/link/verify", response_model=StatusResponse)
+@limiter.limit("10/minute")
+async def google_link_verify(
+    request: Request,
+    response: Response,
+    data: GoogleVerifyRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await GoogleOIDCService(db).link(user=current_user, request=request, response=response, id_token=data.id_token)
+    return StatusResponse(status="success", message="Google akkaunti bog'landi")
+
+
+@router.post("/telegram/link/verify", response_model=StatusResponse)
+@limiter.limit("10/minute")
+async def telegram_link_verify(
+    request: Request,
+    response: Response,
+    data: TelegramVerifyRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    await TelegramOIDCService(db).link_popup(user=current_user, request=request, response=response, id_token=data.id_token)
+    return StatusResponse(status="success", message="Telegram akkaunti bog'landi")

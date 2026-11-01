@@ -257,11 +257,15 @@ async def buy_exam_request(db: AsyncSession, user_id: uuid.UUID, exam_id: str):
         )
     ).scalar_one_or_none()
     if pending_order:
-        raise HTTPException(
-            400,
-            "Sizda ushbu imtihon uchun to'lov kutilayotgan buyurtma allaqachon mavjud "
-            f"(order_id={pending_order.id}) — chek yuklang yoki admin tasdiqlashini kuting.",
-        )
+        # Idempotent: takroriy so'rov yangi buyurtma yaratmaydi va xato bermaydi
+        # (billing/orders endpointi ham shunday qiladi). Kutilayotgan buyurtma
+        # bo'lsa, mavjud MockPurchase qaytariladi.
+        if existing is None:
+            existing = MockPurchase(user_id=user_id, mock_exam_id=exam_id, is_active=False)
+            db.add(existing)
+            await db.commit()
+        await db.refresh(existing)
+        return existing
 
     db.add(
         BillingOrder(

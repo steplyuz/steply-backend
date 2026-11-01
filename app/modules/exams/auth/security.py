@@ -45,6 +45,9 @@ EXAMS_ACCESS_TOKEN_MINUTES = 240
 EXAMS_REFRESH_TOKEN_DAYS = 7
 
 
+JWT_ALGORITHM = "HS256"  # core.security bilan bir xil; alohida sozlama emas
+
+
 def create_exams_access_token(user_id: "uuid.UUID | str", extra_data: Optional[Dict[str, Any]] = None) -> str:
     now = datetime.now(timezone.utc)
     payload: Dict[str, Any] = {
@@ -62,7 +65,7 @@ def create_exams_access_token(user_id: "uuid.UUID | str", extra_data: Optional[D
         if protected.intersection(extra_data):
             raise ValueError("Protected JWT claims cannot be overridden")
         payload.update(extra_data)
-    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=JWT_ALGORITHM)
 
 
 def decode_exams_token(token: str, token_type: str = "exams_access") -> dict:
@@ -70,7 +73,7 @@ def decode_exams_token(token: str, token_type: str = "exams_access") -> dict:
         payload = jwt.decode(
             token,
             settings.SECRET_KEY,
-            algorithms=[settings.ALGORITHM],
+            algorithms=[JWT_ALGORITHM],
             audience=AUDIENCE,
             issuer=ISSUER,
             options={

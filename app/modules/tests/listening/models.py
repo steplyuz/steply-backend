@@ -5,7 +5,7 @@ from sqlalchemy import Enum, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.core.mixins import ExamFlagsMixin, ExamIdMixin, ResultBaseMixin, TimestampMixin
+from app.core.mixins import ExamCommonMixin, ExamFlagsMixin, ExamIdMixin, ResultBaseMixin, TimestampMixin
 
 
 class ListeningQuestionType(str, enum.Enum):
@@ -17,12 +17,11 @@ class ListeningQuestionType(str, enum.Enum):
     SHORT_ANSWER = "SHORT_ANSWER"
 
 
-class ListeningTest(Base, ExamIdMixin, ExamFlagsMixin, TimestampMixin):
+class ListeningTest(Base, ExamIdMixin, ExamFlagsMixin, ExamCommonMixin, TimestampMixin):
     """PAPER 1: LISTENING — 6 qism, 35 savol, ~35 daqiqa (rasmiy DTM formati)."""
 
     __tablename__ = "listening_tests"
 
-    title: Mapped[str] = mapped_column(String, nullable=False)
     cefr_level: Mapped[str] = mapped_column(String, default="B2")
     duration_minutes: Mapped[int] = mapped_column(Integer, default=35)
     total_questions: Mapped[int] = mapped_column(Integer, default=35)
@@ -32,15 +31,7 @@ class ListeningTest(Base, ExamIdMixin, ExamFlagsMixin, TimestampMixin):
     audio_mode: Mapped[str] = mapped_column(String(16), nullable=False, default="PARTS", server_default="PARTS")
     audio_url: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
-    # Part mini-test metadata. NULL for ordinary/full Listening tests.
-    # Reading'dan farqli o'laroq `source_part_id` FK yo'q: update_exam() partlarni
-    # o'chirib qayta yaratadi, FK(CASCADE) bo'lsa mini-testlar ham o'chib ketardi.
-    # Idempotentlik (parent_test_id, practice_part_number) juftligi bilan ta'minlanadi.
-    parent_test_id: Mapped[Optional[str]] = mapped_column(
-        String(64), ForeignKey("listening_tests.id", ondelete="SET NULL", name="fk_listening_tests_parent_test_id"),
-        nullable=True, index=True,
-    )
-    practice_part_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Part mini-test: parent_test_id va practice_part_number umumiy ExamCommonMixin da.
 
     parts: Mapped[List["ListeningPart"]] = relationship(
         back_populates="exam", cascade="all, delete-orphan", lazy="selectin",

@@ -87,12 +87,13 @@ async def env():
             ids[key] = (u.id, phone)
         await s.commit()
 
-    # PLUS obuna: plan default included_skills'ni ishlatadi (SPEAKING ham kiradi)
+    # PLUS obuna: SPEAKING admin tomonidan tanlangan tarifga qo'shiladi (default'da yo'q)
     from datetime import datetime, timedelta, timezone
     from app.modules.billing.models import SubscriptionPlan, SubscriptionTier, UserSubscription
     async with dbm.AsyncSessionLocal() as s:
         plan = SubscriptionPlan(name=f"roles-plus-{uuid.uuid4().hex[:8]}", price=1, duration_days=30,
-                                tier=SubscriptionTier.PLUS)
+                                tier=SubscriptionTier.PLUS,
+                                included_skills=["READING", "LISTENING", "WRITING", "SPEAKING"])
         s.add(plan)
         await s.flush()
         now = datetime.now(timezone.utc)
@@ -167,7 +168,7 @@ async def test_admin_force_delete_is_forbidden_for_writing(env):
     assert r.status_code == 403, r.text
 
 
-async def test_super_admin_force_deletes_writing_with_results(env):
+async def test_delete_writing_cascades_results(env):
     from app.modules.tests.writing.models import WritingResult
 
     r = await env["super"].post(f"{API}/admin/writing-tests", json=writing_body())
@@ -177,10 +178,12 @@ async def test_super_admin_force_deletes_writing_with_results(env):
         s.add(WritingResult(user_id=env["ids"]["student"], exam_id=eid))
         await s.commit()
 
-    # Oddiy DELETE natija bor bo'lgani uchun 409 bo'lishi kerak
-    assert (await env["super"].delete(f"{API}/admin/writing-tests/{eid}")).status_code == 409
-    r = await env["super"].delete(f"{API}/admin/writing-tests/{eid}", params={"force": "true"})
+    # Test o'chsa, unga bog'liq natijalar ham o'chadi (force kerak emas)
+    r = await env["super"].delete(f"{API}/admin/writing-tests/{eid}")
     assert r.status_code == 204, r.text
+    async with dbm.AsyncSessionLocal() as s:
+        from sqlalchemy import func, select
+        assert await s.scalar(select(func.count()).select_from(WritingResult).where(WritingResult.exam_id == eid)) == 0
 
 
 # =====================================================================
@@ -304,7 +307,7 @@ async def test_speaking_unlock_reopens_for_edit(env):
 # =====================================================================
 #  8. FORCE DELETE — Speaking (audio fayllar bilan) va Listening (natija bilan)
 # =====================================================================
-async def test_super_admin_force_deletes_speaking_with_audio(env):
+async def test_delete_speaking_cascades_recordings_and_audio(env):
     from app.core.file_storage import private_path
     from app.modules.tests.speaking.models import SpeakingSubmission
 
@@ -317,13 +320,15 @@ async def test_super_admin_force_deletes_speaking_with_audio(env):
                                  audio_url="", audio_storage_key=key, status="pending"))
         await s.commit()
 
-    assert (await env["admin"].delete(f"{API}/admin/speaking-tests/{sid}")).status_code == 409
-    assert (await env["admin"].delete(f"{API}/admin/speaking-tests/{sid}", params={"force": "true"})).status_code == 403
-    assert (await env["super"].delete(f"{API}/admin/speaking-tests/{sid}", params={"force": "true"})).status_code == 200
+    assert (await env["admin"].delete(f"{API}/admin/speaking-tests/{sid}")).status_code == 200
     assert not audio.exists(), "audio fayl diskdan o'chmadi"
+    async with dbm.AsyncSessionLocal() as s:
+        from sqlalchemy import func, select
+        assert await s.scalar(select(func.count()).select_from(SpeakingSubmission).where(
+            SpeakingSubmission.speaking_test_id == sid)) == 0
 
 
-async def test_super_admin_force_deletes_listening_with_results(env):
+async def test_delete_listening_cascades_results(env):
     from app.modules.tests.listening.models import ListeningResult
 
     lid = (await env["admin"].post(f"{API}/admin/listening-tests", json=listening_body())).json()["id"]
@@ -332,6 +337,8 @@ async def test_super_admin_force_deletes_listening_with_results(env):
                               total_questions=35, correct_answers=0, percentage=0.0))
         await s.commit()
 
-    assert (await env["admin"].delete(f"{API}/admin/listening-tests/{lid}")).status_code == 409
-    assert (await env["admin"].delete(f"{API}/admin/listening-tests/{lid}", params={"force": "true"})).status_code == 403
-    assert (await env["super"].delete(f"{API}/admin/listening-tests/{lid}", params={"force": "true"})).status_code == 204
+    assert (await env["admin"].delete(f"{API}/admin/listening-tests/{lid}")).status_code == 204
+    async with dbm.AsyncSessionLocal() as s:
+        from sqlalchemy import func, select
+        assert await s.scalar(select(func.count()).select_from(ListeningResult).where(
+            ListeningResult.exam_id == lid)) == 0

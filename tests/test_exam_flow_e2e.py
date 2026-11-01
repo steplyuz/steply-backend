@@ -331,7 +331,7 @@ async def test_07_writing_submit_ai_draft_then_human_final(env, monkeypatch):
     monkeypatch.setattr(ai_grader.WritingAIGrader, "evaluate", fake_evaluate)
     draft = ok(await admin.post(f"{API}/admin/writing-tests/results/{result_id}/ai-evaluate", json={}))
     assert draft["evaluation_status"] == "AI_DRAFT" and draft["is_finalized"] is False
-    assert draft["scaled_score"] == pytest.approx(57)  # 5 + 6 = 11/16 → amaldagi CEFR jadvali
+    assert draft["scaled_score"] == pytest.approx(54)  # 5 + 6 = 11 → konversiya jadvali (11 → 54)
 
     # AI qoralama mock skill'ni "tekshirilgan" qilmaydi
     status = ok(await cand.get(f"{API}/exams/attempts/{aid}/status"))
@@ -372,8 +372,8 @@ async def test_08_speaking_upload_closes_exam_session_then_evaluation(env):
     pending = ok(await admin.get(f"{API}/admin/speaking-tests/pending"))
     assert any(p["id"] == sub["id"] for p in pending)
     res = ok(await admin.post(f"{API}/admin/speaking-tests/submissions/{sub['id']}/result", json={
-        "overall_raw": 30, "fluency_coherence": 55, "cefr_level": "B2", "comment": "Yaxshi."}))
-    assert res["overall_band"] == 66  # raw 30 → jadval → 66
+        "overall_raw": 19, "fluency_coherence": 55, "cefr_level": "B2", "comment": "Yaxshi."}))
+    assert res["overall_band"] == 67  # raw 19 → reyting shkalasi → 67
 
 
 async def test_09_overall_result_finalized_and_visible_by_qr(env):
@@ -384,7 +384,7 @@ async def test_09_overall_result_finalized_and_visible_by_qr(env):
     scores = {s["skill"]: s["scaled_score"] for s in detail["skills"]}
     assert scores["READING"] == pytest.approx(67.9, abs=0.1)
     assert scores["LISTENING"] == pytest.approx(72.1, abs=0.1)
-    assert scores["WRITING"] == 67 and scores["SPEAKING"] == 66  # Writing: 14.5/16 → 67; Speaking: 30/36 → 66
+    assert scores["WRITING"] == 65 and scores["SPEAKING"] == 67  # Writing: 14.5 → 65 (konversiya jadvali); Speaking: 19/21 → 67
     assert all(s["is_checked"] for s in detail["skills"])
 
     regs = ok(await admin.get(f"{API}/admin/mock-exams/sessions/{st['session']['id']}/registrations"))

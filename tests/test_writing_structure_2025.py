@@ -56,7 +56,8 @@ def test_task_specs_match_2025_pdf():
 
 def test_expert_total_is_16_and_maps_to_75():
     assert 5 + 5 + 6 == 16
-    assert expert_to_scaled(16) == 75
+    # Yangi konversiya jadvali (ustoz tasdiqlagan): 16 → 72; 75 faqat 17 da (yig'indi 16 ga cheklanadi)
+    assert expert_to_scaled(16) == 72
     assert expert_to_scaled(0) == 0
 
 
@@ -65,7 +66,7 @@ def test_cefr_thresholds():
     assert level_from_scaled(55) == "B2"
     assert level_from_scaled(40) == "B1"
     assert level_from_scaled(30) is None
-    assert EXPERT_TO_SCALED[16] == 75
+    assert EXPERT_TO_SCALED[16] == 72
 
 
 from app.modules.tests.writing.services.scoring import expected_format, format_mismatch

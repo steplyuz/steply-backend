@@ -62,7 +62,7 @@ STATUS_LABELS = {
     "TEACHER_PENDING": "AI bahosi amalda; o‘qituvchi tekshiruvi kutilmoqda",
     "AI_DRAFT": "Qisman AI bahosi — barcha topshiriqlar baholanmagan",
     "PENDING": "Tekshiruv kutilmoqda",
-    "AI_PENDING": "Javob saqlandi — AI krediti/limiti kutilmoqda",
+    "AI_PENDING": "Javob saqlandi — AI kreditlari kutilmoqda",
     "AI_FAILED": "AI baholashda xato — qayta urinib ko‘ring",
 }
 

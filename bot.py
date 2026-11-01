@@ -79,6 +79,15 @@ def is_transient(status: int) -> bool:
 
 
 TEMP_ERROR = "⚠️ Vaqtincha xatolik yuz berdi. Iltimos, birozdan so'ng qayta urinib ko'ring."
+EXPIRED_LINK_TEXT = (
+    "⌛ Havola muddati tugagan yoki allaqachon ishlatilgan.\n\n"
+    "Saytdagi ro'yxatdan o'tish sahifasiga qaytib, qayta boshlang. Sizga yangi havola beriladi."
+)
+EXPIRED_CODE_TEXT = "⌛ Kod muddati tugagan. Saytdagi ro'yxatdan o'tishni qayta boshlang."
+LINK_TAKEN_TEXT = (
+    "❌ Bu havola boshqa Telegram akkauntiga bog'langan. "
+    "Ro'yxatdan o'tishni o'zingizning akkauntingizdan boshlang."
+)
 
 
 # ------------------------------------------------------------------ klaviatura
@@ -113,7 +122,7 @@ def contact_keyboard() -> ReplyKeyboardMarkup:
 # ------------------------------------------------------------------- handlerlar
 
 async def send_code(target: types.Message, telegram_user_id: int) -> str:
-    """Kod olib yuboradi. Qaytaradi: 'ok' | 'need_contact' | 'error'."""
+    """Kod olib yuboradi. Qaytaradi: 'ok' | 'need_contact' | 'expired' | 'error'."""
     status, data = await backend("auth/telegram/register/code", {"telegram_user_id": telegram_user_id})
     if status in OK_STATUSES and data and data.get("code"):
         await target.answer(
@@ -123,8 +132,11 @@ async def send_code(target: types.Message, telegram_user_id: int) -> str:
             reply_markup=code_button(data["code"]),
         )
         return "ok"
-    if status == 403:  # telefon hali tasdiqlanmagan
+    if status == 428:  # telefon hali tasdiqlanmagan (backend: 428)
         return "need_contact"
+    if status in (404, 410):  # yozuv yo'q yoki muddati tugagan
+        logger.info("register/code expired status=%s", status)
+        return "expired"
     logger.warning("register/code status=%s", status)
     return "error"
 
@@ -150,8 +162,16 @@ async def cmd_start(message: types.Message) -> None:
     if is_transient(status):
         await message.answer(TEMP_ERROR)
         return
+    if status == 404:
+        await message.answer(EXPIRED_LINK_TEXT)
+        return
+    if status == 409:
+        await message.answer(LINK_TAKEN_TEXT)
+        return
     if status not in OK_STATUSES or not data:
-        await message.answer("Havola yaroqsiz yoki muddati tugagan. Saytdan yangi havola oling.")
+        # 403 (ichki token), 422 va boshqalar: bu foydalanuvchi xatosi emas, server/sozlama muammosi.
+        logger.error("register/start unexpected status=%s", status)
+        await message.answer(TEMP_ERROR)
         return
 
     # Telefon allaqachon tasdiqlangan bo'lsa kod darrov keladi (1 xabar);
@@ -162,6 +182,8 @@ async def cmd_start(message: types.Message) -> None:
             "✅ Akkaunt bog'landi. Kodni olish uchun telefon raqamingizni tasdiqlang 👇",
             reply_markup=contact_keyboard(),
         )
+    elif outcome == "expired":
+        await message.answer(EXPIRED_CODE_TEXT)
     elif outcome == "error":
         await message.answer(TEMP_ERROR, reply_markup=otp_button())
 
@@ -176,6 +198,8 @@ async def get_otp(callback: types.CallbackQuery) -> None:
             "📱 Kodni olish uchun telefon raqamingizni tasdiqlang 👇",
             reply_markup=contact_keyboard(),
         )
+    elif outcome == "expired":
+        await callback.message.answer(EXPIRED_CODE_TEXT)
     elif outcome == "error":
         await callback.message.answer(TEMP_ERROR)
 
@@ -207,7 +231,10 @@ async def verify_contact(message: types.Message) -> None:
 
     # Alohida "tasdiqlandi" xabari yo'q: kodning o'zi tasdiq. one_time_keyboard
     # klaviaturani o'zi yig'adi. Faqat xatoda zaxira tugma beriladi.
-    if await send_code(message, tg.id) != "ok":
+    outcome = await send_code(message, tg.id)
+    if outcome == "expired":
+        await message.answer(EXPIRED_CODE_TEXT)
+    elif outcome != "ok":
         await message.answer(TEMP_ERROR, reply_markup=otp_button())
 
 
@@ -227,7 +254,11 @@ async def billing_review_callback(callback: types.CallbackQuery, bot: Bot) -> No
     except ValueError:
         await callback.answer("Buyurtma ma’lumoti noto‘g‘ri", show_alert=True)
         return
-    status, data = await backend("billing/telegram/review", {"order_id": order_id, "action": action})
+    status, data = await backend("billing/telegram/review", {
+        "order_id": order_id,
+        "action": action,
+        "reviewer_telegram_id": str(callback.from_user.id),
+    })
     if status not in OK_STATUSES or not data:
         message = (data or {}).get("detail") or "Amal bajarilmadi; buyurtma holatini tekshiring"
         await callback.answer(str(message)[:180], show_alert=True)

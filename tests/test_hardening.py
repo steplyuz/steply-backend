@@ -339,7 +339,7 @@ async def test_admin_can_update_and_deactivate_billing_product(env):
     code = f"AI-{uuid.uuid4().hex[:8].upper()}"
     async with dbm.AsyncSessionLocal() as s:
         product = BillingProduct(
-            product_type=BillingProductType.WRITING_AI_CREDITS,
+            product_type=BillingProductType.AI_CREDITS,
             code=code, title="Writing AI credits", price=15000,
             external_ref="10", is_active=True,
         )
@@ -355,7 +355,7 @@ async def test_admin_can_update_and_deactivate_billing_product(env):
     assert updated.status_code == 200, updated.text
     assert updated.json()["price"] == 20000
     assert updated.json()["is_active"] is False
-    public = await env.get(f"{API}/billing/products?product_type=writing_ai_credits")
+    public = await env.get(f"{API}/billing/products?product_type=ai_credits")
     assert public.status_code == 200
     assert all(row["id"] != product_id for row in public.json())
 

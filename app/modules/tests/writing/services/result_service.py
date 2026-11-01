@@ -518,9 +518,9 @@ class WritingResultService:
         self.db.add(WritingFeedback(answer_id=answer.id, source=FeedbackSource.AI, model_name=model_name,
                                     content=json.dumps(payload, ensure_ascii=False)))
         if record_usage:
-            from app.modules.billing.models import WritingAIUsage
-            self.db.add(WritingAIUsage(
-                user_id=result.user_id, answer_id=answer.id,
+            from app.modules.billing.models import AIUsage
+            self.db.add(AIUsage(
+                user_id=result.user_id, feature="writing", answer_id=answer.id,
                 billing_source="purchased" if answer.id in purchased_answer_ids else "subscription",
             ))
         result.ai_evaluated_at = datetime.now(timezone.utc)
