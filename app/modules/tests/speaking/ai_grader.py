@@ -169,20 +169,20 @@ def _result(part: str, score: int, questions: list, feedback: str, *, sides: dic
         "allowed_range": list(bounds),
     }
 
-
 def _extract_json(text: str) -> dict:
-    """Model javobidan JSON obyektini ajratadi (```json fence va ortiqcha matnni olib tashlaydi)."""
     cleaned = (text or "").strip()
     cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start == -1 or end <= start:
         raise ValueError("javobda JSON obyekt topilmadi")
-    data = json.loads(cleaned[start:end + 1])
+    candidate = cleaned[start:end + 1]
+    # Model ba'zan kalitni ikki marta o'raydi: {"{"score": ...} -> {"score": ...}
+    candidate = re.sub(r'^\{\s*"\{"', '{"', candidate)
+    data = json.loads(candidate)
     if not isinstance(data, dict):
         raise ValueError("JSON obyekt emas")
     return data
-
 
 def _build_result(part: str, data: dict) -> dict:
     """Model JSON'ini tekshiradi va rasmiy diapazon bo'yicha yakuniy ballni hisoblaydi.
