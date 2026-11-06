@@ -32,3 +32,5 @@ static/templates/ANSWER_SHEET_MASTER_OMR.png
 # redis dump
 dump.rdb
 steply-backend.zip
+static/speaking_images/
+static/listening_maps/
