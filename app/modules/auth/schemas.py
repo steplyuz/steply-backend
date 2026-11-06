@@ -46,6 +46,8 @@ class RegisterRequest(BaseModel):
     full_name: str = Field(min_length=2, max_length=120)
     birth_date: str = Field(min_length=10, max_length=10)
     gender: Literal["male", "female"]
+    # Kodni qaysi kanal orqali olishni foydalanuvchi tanlaydi. Standart: SMS.
+    channel: Literal["sms", "telegram"] = "sms"
 
     _normalize_phone = field_validator("phone")(_phone_validator)
 
@@ -54,6 +56,9 @@ class RegisterInitResponse(BaseModel):
     message: str
     expires_in_seconds: int
     bot_link: Optional[str] = None
+    # Kod haqiqatda qaysi kanal orqali yuborildi: SMS muvaffaqiyatli bo'lsa "sms",
+    # aks holda (Telegram tanlangan yoki SMS xatosi) "telegram" — kod bot orqali beriladi.
+    delivery: Literal["sms", "telegram"] = "telegram"
 
 class RegisterVerifyRequest(BaseModel):
     phone: str

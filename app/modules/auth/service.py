@@ -275,6 +275,7 @@ class AuthService:
                 message=_REGISTER_SENT_MESSAGE,
                 expires_in_seconds=self.BOT_LINK_EXPIRE_MINUTES * 60,
                 bot_link=await self._create_decoy_bot_link(),
+                delivery="sms" if data.channel == "sms" else "telegram",
             )
 
         payload = {
@@ -282,11 +283,12 @@ class AuthService:
             "full_name": data.full_name,
             "birth_date": data.birth_date,
             "gender": data.gender,
+            "channel": data.channel,
         }
         result = await self.send_otp(
             phone=data.phone,
             purpose=OtpPurpose.REGISTER,
-            channel=OtpChannel.SMS,
+            channel=OtpChannel.TELEGRAM if data.channel == "telegram" else OtpChannel.SMS,
             payload=payload,
             source="web",
             client_ip=_get_ip(request),
@@ -296,6 +298,7 @@ class AuthService:
             message=_REGISTER_SENT_MESSAGE,
             expires_in_seconds=self.BOT_LINK_EXPIRE_MINUTES * 60,
             bot_link=result.get("bot_link"),
+            delivery="sms" if result.get("sms_sent") else "telegram",
         )
 
     # =====================================================
@@ -317,15 +320,19 @@ class AuthService:
         if not pending or not pending.payload:
             raise HTTPException(400, "Kod noto'g'ri yoki eskirgan")
 
-        payload = json.loads(pending.payload)
-        tg_id = pending.telegram_user_id
-        if not tg_id or not payload.get("telegram_phone_verified"):
-            raise HTTPException(400, "Telegram raqamini tasdiqlashni yakunlang")
-
         record = await self._consume_otp(phone, code, purpose=OtpPurpose.REGISTER)
         if not record or not record.payload:
             raise HTTPException(400, "Kod noto'g'ri yoki eskirgan")
         payload = json.loads(record.payload)
+
+        # Kod SMS orqali yetib kelgan bo'lsa, telefon egaligi kod o'zi bilan isbotlanadi.
+        # Telegram tasdiqlash faqat kod bot orqali berilgan holatda talab qilinadi.
+        tg_id = record.telegram_user_id
+        telegram_verified = bool(tg_id and payload.get("telegram_phone_verified"))
+        # SMS tanlanib, muvaffaqiyatli yuborilgan bo'lsa Telegram tasdiqlash talab qilinmaydi.
+        sms_path = payload.get("channel") != "telegram" and bool(payload.get("sms_delivered"))
+        if not sms_path and not telegram_verified:
+            raise HTTPException(400, "Telegram raqamini tasdiqlashni yakunlang")
 
         existing = (
             await self.db.execute(
@@ -338,28 +345,29 @@ class AuthService:
         if existing:
             raise HTTPException(400, "Tasdiqlash jarayoni yaroqsiz yoki eskirgan")
 
-        existing_identity = (
-            await self.db.execute(
-                select(Identity).where(
-                    Identity.provider == "telegram",
-                    Identity.provider_user_id == str(tg_id),
+        if tg_id:
+            existing_identity = (
+                await self.db.execute(
+                    select(Identity).where(
+                        Identity.provider == "telegram",
+                        Identity.provider_user_id == str(tg_id),
+                    )
                 )
-            )
-        ).scalar_one_or_none()
-        if existing_identity:
-            raise HTTPException(409, "Bu Telegram akkaunti allaqachon ro'yxatdan o'tgan")
+            ).scalar_one_or_none()
+            if existing_identity:
+                raise HTTPException(409, "Bu Telegram akkaunti allaqachon ro'yxatdan o'tgan")
 
-        # Telegram OIDC orqali yaratilgan akkauntlar identity'ni `sub` bilan yozadi,
-        # lekin User.telegram_user_id (UNIQUE) ni ham to'ldiradi. Shuni tekshirmasak,
-        # INSERT IntegrityError berib umumiy "ziddiyat" xatosi chiqadi.
-        existing_tg_user = (await self.db.execute(
-            select(User.id).where(User.telegram_user_id == tg_id)
-        )).scalar_one_or_none()
-        if existing_tg_user is not None:
-            raise HTTPException(
-                409,
-                "Bu Telegram akkaunti allaqachon ro'yxatdan o'tgan. Telegram orqali kirib ko'ring",
-            )
+            # Telegram OIDC orqali yaratilgan akkauntlar identity'ni `sub` bilan yozadi,
+            # lekin User.telegram_user_id (UNIQUE) ni ham to'ldiradi. Shuni tekshirmasak,
+            # INSERT IntegrityError berib umumiy "ziddiyat" xatosi chiqadi.
+            existing_tg_user = (await self.db.execute(
+                select(User.id).where(User.telegram_user_id == tg_id)
+            )).scalar_one_or_none()
+            if existing_tg_user is not None:
+                raise HTTPException(
+                    409,
+                    "Bu Telegram akkaunti allaqachon ro'yxatdan o'tgan. Telegram orqali kirib ko'ring",
+                )
 
         birth_date = date.fromisoformat(payload["birth_date"])
         gender = Gender(payload["gender"])
@@ -375,20 +383,22 @@ class AuthService:
             profile = (await self.db.execute(
                 select(UserProfile).where(UserProfile.user_id == user.id)
             )).scalar_one()
-            tg_username = (payload.get("telegram_username") or "").lstrip("@")[:50] or None
-            if tg_username:
-                owner = (await self.db.execute(
-                    select(UserProfile.user_id).where(UserProfile.username == tg_username)
-                )).scalar_one_or_none()
-                if owner is None:
-                    profile.username = tg_username
-            profile.avatar_url = payload.get("telegram_photo_url") or None
+            if tg_id:
+                tg_username = (payload.get("telegram_username") or "").lstrip("@")[:50] or None
+                if tg_username:
+                    owner = (await self.db.execute(
+                        select(UserProfile.user_id).where(UserProfile.username == tg_username)
+                    )).scalar_one_or_none()
+                    if owner is None:
+                        profile.username = tg_username
+                profile.avatar_url = payload.get("telegram_photo_url") or None
             user.last_login_at = datetime.now(timezone.utc)
-            self.db.add(Identity(
-                user_id=user.id,
-                provider="telegram",
-                provider_user_id=str(tg_id),
-            ))
+            if tg_id:
+                self.db.add(Identity(
+                    user_id=user.id,
+                    provider="telegram",
+                    provider_user_id=str(tg_id),
+                ))
             await self.db.flush()
         except IntegrityError as exc:
             raise HTTPException(409, "Ro'yxatdan o'tishda ziddiyat yuz berdi, qayta urinib ko'ring") from exc
@@ -496,10 +506,16 @@ class AuthService:
         await self.db.flush()
 
         
-        if settings.is_production or settings.SMS_ENABLED:
+        # Telegram tanlangan ro'yxatdan o'tishda SMS yuborilmaydi
+        want_sms = not (purpose == OtpPurpose.REGISTER and channel == OtpChannel.TELEGRAM)
+        sms_sent = False
+        if not want_sms:
+            logger.info("REGISTER: Telegram kanali tanlangan, SMS yuborilmadi")
+        elif settings.is_production or settings.SMS_ENABLED:
             logger.info("OTP SMS yuborish boshlandi")
             try:
                 await SmsService.send_otp(phone, code)
+                sms_sent = True
                 logger.info("OTP SMS so'rovi muvaffaqiyatli yakunlandi")
             except Exception:
                 logger.exception("OTP SMS yuborishda xatolik yuz berdi")
@@ -518,7 +534,14 @@ class AuthService:
         else:
             logger.warning("SMS_ENABLED=false: SMS yuborish o'tkazib yuborildi")
 
-        result = {"status": "sent"}
+        if purpose == OtpPurpose.REGISTER:
+            # Kod SMS orqali yetdimi yo'qmi — register_verify shu belgiga qaraydi
+            stored = json.loads(record.payload) if record.payload else {}
+            stored["sms_delivered"] = sms_sent
+            record.payload = json.dumps(stored)
+            await self.db.flush()
+
+        result = {"status": "sent", "sms_sent": sms_sent}
         if raw_bot_token:
             result["bot_link"] = TelegramService.build_start_link(raw_bot_token)
         return result
