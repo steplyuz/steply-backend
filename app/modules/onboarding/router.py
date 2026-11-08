@@ -29,6 +29,7 @@ def _to_response(profile) -> OnboardingResponse:
         strengths=profile.strengths,
         weaknesses=profile.weaknesses,
         exam_date_id=profile.exam_date_id,
+        exam_date_pending=bool(profile.exam_date_pending),
         daily_hours=profile.daily_hours,
         teacher_hours=profile.teacher_hours,
         is_complete=service.is_complete(profile),
@@ -54,6 +55,8 @@ async def update_onboarding(
     data = payload.model_dump(exclude_unset=True)
     if data.get("exam_date_id") is not None:
         await service.get_active_exam_date(db, data["exam_date_id"])
+    if data.get("exam_date_pending"):
+        await service.ensure_pending_allowed(db)
     profile = await service.get_or_create_profile(db, user.id)
     service.apply_update(profile, data)
     await db.commit()

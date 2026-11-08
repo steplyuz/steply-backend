@@ -23,11 +23,14 @@ class OnboardingUpdate(BaseModel):
     strengths: Optional[list[Skill]] = Field(default=None, max_length=6)
     weaknesses: Optional[list[Skill]] = Field(default=None, max_length=6)
     exam_date_id: Optional[int] = None
+    exam_date_pending: Optional[bool] = None
     daily_hours: Optional[DailyHours] = None
     teacher_hours: Optional[TeacherHours] = None
 
     @model_validator(mode="after")
     def _check_consistency(self):
+        if self.exam_date_pending and self.exam_date_id is not None:
+            raise ValueError("Imtihon sanasi va 'sana hali e'lon qilinmagan' bir vaqtda tanlanmaydi")
         if self.strengths is not None and self.weaknesses is not None:
             overlap = set(self.strengths) & set(self.weaknesses)
             if overlap:
@@ -49,6 +52,7 @@ class OnboardingResponse(BaseModel):
     strengths: Optional[list[str]] = None
     weaknesses: Optional[list[str]] = None
     exam_date_id: Optional[int] = None
+    exam_date_pending: bool = False
     daily_hours: Optional[float] = None
     teacher_hours: Optional[float] = None
     is_complete: bool = False

@@ -3,7 +3,7 @@ import uuid
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Uuid, func
+from sqlalchemy import JSON, Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Uuid, false, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -49,6 +49,10 @@ class OnboardingProfile(Base):
     # Reja
     exam_date_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("onboarding_exam_dates.id", ondelete="SET NULL"), nullable=True
+    )
+    # Ro'yxatda sana yo'q bo'lganda foydalanuvchi "sana hali e'lon qilinmagan" deb davom etadi
+    exam_date_pending: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
     )
     daily_hours: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     teacher_hours: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
