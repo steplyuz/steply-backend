@@ -1,49 +1,69 @@
 # app/modules/exams/listening/service.py
-from app.core.paths import LISTENING_AUDIO_DIR
 import logging
-from app.modules.tests.scoring_policy import scale_listening_reading
-from typing import List, Any, Tuple, Optional
-
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
-from sqlalchemy.ext.asyncio import AsyncSession
-from fastapi import HTTPException, UploadFile
 import math
 import os
 import uuid
+from typing import Any, List, Optional, Tuple
 
+import aiofiles
+from fastapi import HTTPException, UploadFile
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from app.core.clock import utcnow
+from app.core.file_storage import generated_name, private_path, safe_suffix
+from app.core.id_generator import generate_listening_id
+from app.modules.exams.mock.finalize import try_finalize_mock_attempt
 from app.modules.exams.mock.models import MockSkillAttempt, SkillType
 from app.modules.exams.mock.usage import (
     ensure_deletable, ensure_not_in_mock_exam, ensure_no_results,
     purge_exam_versions, purge_practice_attempts, purge_results,
 )
-
-from .models import (
-    ListeningTest,
-    ListeningPart,
-    ListeningQuestion,
-    ListeningQuestionOption,
-    ListeningPartOption,
-    ListeningResult,
-)
-from .schemas import ListeningExamCreate, ListeningExamUpdate, ListeningSubmission, ListeningAudioMode
-
+from app.modules.exams.paper.exam_paper_mixin import PaperVersionedExamMixin
 from app.modules.exams.paper.models import PaperModule
 from app.modules.exams.paper.schemas import LockValidationError
-from app.modules.exams.paper.exam_paper_mixin import PaperVersionedExamMixin
-from app.modules.exams.mock.finalize import try_finalize_mock_attempt
-from app.core.id_generator import generate_listening_id
-from app.core.file_storage import generated_name, safe_suffix
-from app.core.clock import utcnow
+from app.modules.tests.scoring_policy import scale_listening_reading
+
+from .models import (
+    ListeningPart,
+    ListeningPartOption,
+    ListeningQuestion,
+    ListeningQuestionOption,
+    ListeningResult,
+    ListeningTest,
+)
+from .schemas import (
+    ListeningAudioMode,
+    ListeningExamCreate,
+    ListeningExamUpdate,
+    ListeningSubmission,
+)
 
 logger = logging.getLogger(__name__)
 
 # Rasmiy formal imtihon: 6 qism, 35 savol, savol raqamlari 1..35 uzluksiz.
-# Qism chegaralari (qaysi qismda qaysi savollar) endi qat'iy yozilmaydi:
-# Test 1 (15-18, 19-23, 24-29, 30-35) va Mock 19 (15-19, 20-24, 25-30, 31-35)
-# ikkalasi ham shu qoidaga mos keladi.
 FORMAL_PART_COUNT = 6
 FORMAL_TOTAL_QUESTIONS = 35
+
+# Audio: fayl private papkada saqlanadi, router shu kategoriyadan beradi.
+# Qiymat router dagi AUDIO_CATEGORY bilan BIR XIL bo'lishi shart.
+LISTENING_AUDIO_CATEGORY = "listening_audio"
+LISTENING_AUDIO_URL_PREFIX = "/api/v1/exams/listening-audio"
+MAX_AUDIO_BYTES = 100 * 1024 * 1024  # nginx client_max_body_size 100M bilan mos
+AUDIO_CHUNK_SIZE = 1024 * 1024       # 1 MB: fayl xotiraga to'liq o'qilmaydi
+
+
+def _valid_audio_signature(header: bytes, ext: str) -> bool:
+    """Fayl boshidagi magic bytes kengaytmaga mos kelishini tekshiradi."""
+    return (
+        (header.startswith(b"RIFF") and header[8:12] == b"WAVE" and ext == ".wav")
+        or (header.startswith(b"OggS") and ext == ".ogg")
+        or (header.startswith(b"ID3") and ext == ".mp3")
+        or (len(header) >= 2 and header[0] == 0xFF and (header[1] & 0xE0) == 0xE0 and ext == ".mp3")
+        or (header.startswith(b"\x1a\x45\xdf\xa3") and ext == ".webm")
+        or (len(header) >= 8 and header[4:8] == b"ftyp" and ext == ".m4a")
+    )
 
 
 class ListeningService(PaperVersionedExamMixin):
@@ -52,7 +72,7 @@ class ListeningService(PaperVersionedExamMixin):
     PAPER_MODULE = PaperModule.LISTENING
     MODULE_LABEL = "LISTENING"
     NOT_FOUND_DETAIL = "Listening test topilmadi"
-    # Eslatma: mixin `_is_partial` shu atributga tayanishi mumkin. Qarang: pastdagi izoh.
+    # Eslatma: mixin `_is_partial` shu atributga tayanishi mumkin (TODO: tekshiring).
     TEMPLATE_PARTS = {1: (1, 8), 2: (9, 14), 3: (15, 18), 4: (19, 23), 5: (24, 29), 6: (30, 35)}
     TEMPLATE_ORDERED = True
     _QUESTION_MODEL = ListeningQuestion
@@ -63,7 +83,7 @@ class ListeningService(PaperVersionedExamMixin):
         self.db = db
 
     # ================================================================
-    #  STRUCTURE VALIDATION (qat'iy shablon o'rniga umumiy qoida)
+    #  STRUCTURE VALIDATION
     # ================================================================
     def _validate_template_structure(self, parts, is_practice: bool = False):
         """Formal (is_practice=False) test tuzilmasini tekshiradi.
@@ -71,8 +91,8 @@ class ListeningService(PaperVersionedExamMixin):
         Qoidalar:
           - qismlar soni 6 va part_number lari 1..6 (takrorsiz);
           - har bir qismda kamida bitta savol, savol raqamlari uzluksiz;
-          - barcha savol raqamlari 1..35 oralig'ida, takrorsiz, bo'shliqsiz;
-          - qismlar savol raqamlari bo'yicha ketma-ket (1-qism oldin, 2-qism keyin...).
+          - barcha savol raqamlari 1..35 oralig'ida, takrorsiz, to'liq;
+          - qismlar savol raqamlari bo'yicha ketma-ket.
 
         Practice (qisman) testlar erkin qabul qilinadi.
         """
@@ -140,9 +160,7 @@ class ListeningService(PaperVersionedExamMixin):
     async def lock_exam(self, exam_id: str, locked_by_user_id: Optional[int] = None):
         exam = await self._load_exam_or_404(exam_id)
 
-        # Audio finalizationdan oldin tekshiriladi — missing audio bo'lsa
-        # version tasodifan locked bo'lib qolmaydi. (Bu tekshiruv faqat
-        # Listeningga tegishli, shuning uchun mixinga ko'chirilmadi.)
+        # Audio finalizationdan oldin tekshiriladi.
         audio_errors: list[LockValidationError] = []
         if str(exam.audio_mode or "PARTS").upper() == ListeningAudioMode.EXAM.value:
             if not (exam.audio_url or "").strip():
@@ -234,17 +252,17 @@ class ListeningService(PaperVersionedExamMixin):
         return render_listening_pdf(exam_payload)
 
     # ================================================================
-    #  SCORING LOGIC (BAHOLASH)
+    #  SCORING LOGIC
     # ================================================================
     def _calculate_listening_metrics(self, correct_count: int) -> Tuple[float, str]:
         """Raw → (ball, CEFR). Formula yagona manbada: scoring_policy.scale_listening_reading."""
         return scale_listening_reading(correct_count)
 
     # ================================================================
-    #  HELPERS (Struktura yaratish)
+    #  HELPERS (struktura yaratish)
     # ================================================================
     async def _create_structure(self, exam_id: str, parts_data: List[Any]):
-        for part_index, p_data in enumerate(parts_data, start=1):
+        for p_data in parts_data:
             new_part = ListeningPart(
                 exam_id=exam_id,
                 external_id=p_data.external_id or str(uuid.uuid4()),
@@ -262,16 +280,15 @@ class ListeningService(PaperVersionedExamMixin):
             self.db.add(new_part)
             await self.db.flush()
 
-            if p_data.options:
-                for opt_index, opt in enumerate(p_data.options, start=1):
-                    self.db.add(ListeningPartOption(
-                        part_id=new_part.id,
-                        external_id=opt.external_id or str(uuid.uuid4()),
-                        value=opt.value,
-                        label=opt.label,
-                    ))
+            for opt in (p_data.options or []):
+                self.db.add(ListeningPartOption(
+                    part_id=new_part.id,
+                    external_id=opt.external_id or str(uuid.uuid4()),
+                    value=opt.value,
+                    label=opt.label,
+                ))
 
-            for q_index, q_data in enumerate(p_data.questions, start=1):
+            for q_data in p_data.questions:
                 new_q = ListeningQuestion(
                     part_id=new_part.id,
                     external_id=q_data.external_id or str(uuid.uuid4()),
@@ -283,17 +300,16 @@ class ListeningService(PaperVersionedExamMixin):
                 self.db.add(new_q)
                 await self.db.flush()
 
-                if q_data.options:
-                    for opt_index, opt in enumerate(q_data.options, start=1):
-                        self.db.add(ListeningQuestionOption(
-                            question_id=new_q.id,
-                            external_id=opt.external_id or str(uuid.uuid4()),
-                            value=opt.value,
-                            label=opt.label,
-                        ))
+                for opt in (q_data.options or []):
+                    self.db.add(ListeningQuestionOption(
+                        question_id=new_q.id,
+                        external_id=opt.external_id or str(uuid.uuid4()),
+                        value=opt.value,
+                        label=opt.label,
+                    ))
 
     # ================================================================
-    #  CRUD METHODS
+    #  CRUD
     # ================================================================
     @staticmethod
     def _validate_audio_config(data: ListeningExamCreate | ListeningExamUpdate, parts=None):
@@ -310,45 +326,58 @@ class ListeningService(PaperVersionedExamMixin):
                     raise HTTPException(422, detail=f"audio_mode=PARTS bo'lganda har bir part uchun audio kerak: {missing}")
 
     async def upload_audio(self, file: UploadFile) -> dict:
+        """Audioni private papkaga chunk-chunk yozadi.
+
+        Fayl xotiraga to'liq o'qilmaydi. Magic bytes kengaytmaga mos bo'lishi shart.
+        Xato bo'lsa yarim yozilgan fayl o'chiriladi.
+        """
         allowed = {".mp3", ".m4a", ".wav", ".ogg", ".webm"}
         ext = safe_suffix(os.path.splitext(file.filename or "")[1].lower(), allowed)
-        max_bytes = 50 * 1024 * 1024
-        data = await file.read(max_bytes + 1)
-        if not data:
-            raise HTTPException(400, detail="Audio fayl bo'sh.")
-        if len(data) > max_bytes:
-            raise HTTPException(413, detail="Audio hajmi 50 MB dan oshmasligi kerak.")
-        valid = (
-            (data.startswith(b"RIFF") and data[8:12] == b"WAVE" and ext == ".wav")
-            or (data.startswith(b"OggS") and ext == ".ogg")
-            or (data.startswith(b"ID3") and ext == ".mp3")
-            or (len(data) >= 2 and data[0] == 0xFF and (data[1] & 0xE0) == 0xE0 and ext == ".mp3")
-            or (data.startswith(b"\x1a\x45\xdf\xa3") and ext == ".webm")
-            or (len(data) >= 8 and data[4:8] == b"ftyp" and ext == ".m4a")
-        )
-        if not valid:
-            raise HTTPException(415, detail="Audio fayl tarkibi kengaytmaga mos kelmadi.")
-        directory = LISTENING_AUDIO_DIR
-        directory.mkdir(parents=True, exist_ok=True)
+
         filename = generated_name(ext)
-        path = directory / filename
-        import aiofiles
-        async with aiofiles.open(path, "wb") as f:
-            await f.write(data)
-        return {"url": f"/api/v1/exams/listening-audio/{filename}", "filename": filename, "size": len(data)}
+        try:
+            path = private_path(LISTENING_AUDIO_CATEGORY, filename)
+        except ValueError as exc:
+            logger.error("Unsafe listening audio storage path: %s", exc)
+            raise HTTPException(400, detail="Audio saqlash yo'li noto'g'ri.")
+
+        size = 0
+        header = b""
+        try:
+            async with aiofiles.open(path, "wb") as f:
+                while chunk := await file.read(AUDIO_CHUNK_SIZE):
+                    size += len(chunk)
+                    if size > MAX_AUDIO_BYTES:
+                        raise HTTPException(413, detail="Audio hajmi 100 MB dan oshmasligi kerak.")
+                    if len(header) < 16:
+                        header += chunk[: 16 - len(header)]
+                    await f.write(chunk)
+
+            if size == 0:
+                raise HTTPException(400, detail="Audio fayl bo'sh.")
+            if not _valid_audio_signature(header, ext):
+                raise HTTPException(415, detail="Audio fayl tarkibi kengaytmaga mos kelmadi.")
+        except HTTPException:
+            path.unlink(missing_ok=True)
+            raise
+        except Exception as exc:
+            path.unlink(missing_ok=True)
+            logger.exception("Listening audio upload failed: %s", exc)
+            raise HTTPException(500, detail="Audio yuklashda xatolik yuz berdi.")
+
+        return {
+            "url": f"{LISTENING_AUDIO_URL_PREFIX}/{filename}",
+            "filename": filename,
+            "size": size,
+        }
 
     async def create_exam(self, data: ListeningExamCreate):
         try:
-            # Faqat to'liq formal exam uchun qat'iy tekshiriladi.
-            # Qismlarga ajratilgan yoki practice testlar erkin qabul qilinadi.
-            # Partlar part_number bo'yicha tartiblanadi; part-only test practice sanaladi.
             data.parts = sorted(data.parts, key=lambda part: part.part_number)
             if "is_practice" not in data.model_fields_set and self._is_partial(data.parts):
                 data.is_practice = True
             self._validate_template_structure(data.parts, is_practice=data.is_practice)
-            # Audio draft bosqichida majburiy emas. Final PDF/OMR uchun /lock audio
-            # konfiguratsiyasini qat'iy tekshiradi.
-            # Auto-generate ID — client never supplies it
+
             exam_id = data.id or generate_listening_id()
             if data.id and await self.db.get(ListeningTest, exam_id):
                 raise HTTPException(409, "Bu test ID allaqachon mavjud")
@@ -379,18 +408,11 @@ class ListeningService(PaperVersionedExamMixin):
             raise
         except Exception as e:
             await self.db.rollback()
-            # Ichki xato matnini (SQL, yo'llar) mijozga qaytarmaymiz.
             logger.exception("Error creating listening exam: %s", e)
             raise HTTPException(400, detail="Listening imtihonini yaratib bo'lmadi. Ma'lumotlarni tekshiring.")
 
     async def create_part_mini_tests(self, exam_id: str) -> dict:
-        """Har bir partdan mustaqil Listening mini-test yaratadi; takroriy chaqiruv dublikat yaratmaydi.
-
-        - Savol/part raqamlari ASL holicha saqlanadi (instruction, gap-fill matni va
-          xarita belgilari "(15-18)" kabi raqamlarga tayanadi).
-        - audio_mode=PARTS: part audiosi nusxalanadi.
-        - audio_mode=EXAM: umumiy audio_url va shu partning start/end segmenti saqlanadi.
-        """
+        """Har bir partdan mustaqil Listening mini-test yaratadi; takroriy chaqiruv dublikat yaratmaydi."""
         source = await self.get_exam_by_id(exam_id)
         if not source:
             raise HTTPException(status_code=404, detail="Listening test topilmadi")
@@ -405,7 +427,6 @@ class ListeningService(PaperVersionedExamMixin):
         mode = str(source.audio_mode or "PARTS").upper()
         is_exam_audio = mode == ListeningAudioMode.EXAM.value
 
-        # Audiosiz mini-test foydasiz — aniq xabar bilan to'xtatamiz.
         if is_exam_audio:
             if not (source.audio_url or "").strip():
                 raise HTTPException(status_code=400, detail="audio_mode=EXAM bo'lsa umumiy audio_url kiritilishi shart")
@@ -548,7 +569,6 @@ class ListeningService(PaperVersionedExamMixin):
         if not exam:
             raise HTTPException(404, detail="Imtihon topilmadi")
 
-        # Create'dagi kabi: qism/savol shablonini buzilgan holda saqlamaymiz.
         if data.parts is not None:
             data.parts = sorted(data.parts, key=lambda part: part.part_number)
             practice = data.is_practice if getattr(data, "is_practice", None) is not None else exam.is_practice
@@ -563,7 +583,6 @@ class ListeningService(PaperVersionedExamMixin):
                 setattr(exam, key, value)
 
         if data.parts is not None:
-            # ORM orqali o'chiramiz (bulk DELETE bola qatorlarni qoldirib ketardi)
             old_parts = (await self.db.execute(
                 select(ListeningPart).where(ListeningPart.exam_id == exam_id)
             )).scalars().all()
@@ -580,7 +599,6 @@ class ListeningService(PaperVersionedExamMixin):
         exam = await self.db.get(ListeningTest, exam_id)
         if not exam:
             return False
-        # Yagona qoida (exams/mock/usage.py): mock/OMR -> doim 409; natija/urinish -> faqat force (SUPER_ADMIN).
         await ensure_deletable(
             self.db, skill="listening", module=PaperModule.LISTENING, test_id=exam_id,
             result_model=ListeningResult, result_col=ListeningResult.exam_id, force=force,
@@ -596,12 +614,7 @@ class ListeningService(PaperVersionedExamMixin):
     #  RESULTS & SUBMISSION
     # ================================================================
     async def submit_exam_and_get_result(self, user_id: uuid.UUID, data: ListeningSubmission):
-        """Javoblarni yuborish (eski kontrakt saqlangan).
-
-        Body'dagi `user_answers` avval DB'ga upsert qilinadi, baholash SAQLANGAN
-        javoblardan server tomonda bajariladi va natija DB'ga yoziladi
-        (qarang: attempt_service). Takroriy yuborish mavjud natijani qaytaradi.
-        """
+        """Javoblarni yuborish. Baholash saqlangan javoblardan server tomonda bajariladi."""
         from app.modules.tests.attempts import common as at
         from app.modules.tests.attempts import submit as _sub
 
@@ -640,7 +653,6 @@ class ListeningService(PaperVersionedExamMixin):
         )
         res = await self.db.execute(stmt)
         result_data = res.scalar_one_or_none()
-
         if not result_data:
             return None
 
@@ -651,16 +663,15 @@ class ListeningService(PaperVersionedExamMixin):
         review_data = []
         for part in exam.parts:
             for q in part.questions:
-                u_ans = result_data.user_answers.get(str(q.question_number), "").strip().lower()
-                c_ans_raw = q.correct_answer.strip().lower()
-                valid_options = [a.strip() for a in c_ans_raw.split("/") if a.strip()]
-
+                raw_answer = result_data.user_answers.get(str(q.question_number), "")
+                u_ans = raw_answer.strip().lower()
+                valid_options = [a.strip() for a in q.correct_answer.strip().lower().split("/") if a.strip()]
                 is_correct = bool(u_ans) and u_ans in valid_options
 
                 review_data.append({
                     "question_id": q.id,
                     "question_number": q.question_number,
-                    "user_answer": result_data.user_answers.get(str(q.question_number), ""),
+                    "user_answer": raw_answer,
                     "correct_answer": q.correct_answer,
                     "is_correct": is_correct,
                     "type": q.type,
@@ -678,11 +689,8 @@ class ListeningService(PaperVersionedExamMixin):
         self, exam_attempt_id: int, score: float, cefr_level: str, user_id: uuid.UUID,
         raw_score: float = 0.0,
     ):
-        # IDOR FIX: mirrors reading_test._update_mock_reading — `exam_attempt_id`
-        # is client-supplied (ListeningSubmission), so without the `user_id`
-        # filter any authenticated user could overwrite another student's
-        # Listening skill score. Filtering on MockSkillAttempt.user_id restricts
-        # this to the caller's own skill row.
+        # IDOR himoyasi: exam_attempt_id client tomonidan keladi, shuning uchun
+        # faqat foydalanuvchining o'z skill qatori yangilanadi.
         stmt = select(MockSkillAttempt).where(
             MockSkillAttempt.attempt_id == exam_attempt_id,
             MockSkillAttempt.skill == SkillType.LISTENING,
