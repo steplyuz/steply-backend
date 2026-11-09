@@ -1,3 +1,4 @@
+# app/modules/exams/listening/service.py
 from app.core.paths import LISTENING_AUDIO_DIR
 import logging
 from app.modules.tests.scoring_policy import scale_listening_reading
@@ -11,7 +12,6 @@ import math
 import os
 import uuid
 
-# Mock Models (Integratsiya uchun)
 from app.modules.exams.mock.models import MockSkillAttempt, SkillType
 from app.modules.exams.mock.usage import (
     ensure_deletable, ensure_not_in_mock_exam, ensure_no_results,
@@ -19,12 +19,12 @@ from app.modules.exams.mock.usage import (
 )
 
 from .models import (
-    ListeningTest, 
-    ListeningPart, 
-    ListeningQuestion, 
-    ListeningQuestionOption, 
+    ListeningTest,
+    ListeningPart,
+    ListeningQuestion,
+    ListeningQuestionOption,
     ListeningPartOption,
-    ListeningResult
+    ListeningResult,
 )
 from .schemas import ListeningExamCreate, ListeningExamUpdate, ListeningSubmission, ListeningAudioMode
 
@@ -38,12 +38,21 @@ from app.core.clock import utcnow
 
 logger = logging.getLogger(__name__)
 
+# Rasmiy formal imtihon: 6 qism, 35 savol, savol raqamlari 1..35 uzluksiz.
+# Qism chegaralari (qaysi qismda qaysi savollar) endi qat'iy yozilmaydi:
+# Test 1 (15-18, 19-23, 24-29, 30-35) va Mock 19 (15-19, 20-24, 25-30, 31-35)
+# ikkalasi ham shu qoidaga mos keladi.
+FORMAL_PART_COUNT = 6
+FORMAL_TOTAL_QUESTIONS = 35
+
+
 class ListeningService(PaperVersionedExamMixin):
     # PaperVersionedExamMixin konfiguratsiyasi — Reading bilan umumiy
     # paper/answer-key/answer-sheet qatlami shu orqali keladi.
     PAPER_MODULE = PaperModule.LISTENING
     MODULE_LABEL = "LISTENING"
     NOT_FOUND_DETAIL = "Listening test topilmadi"
+    # Eslatma: mixin `_is_partial` shu atributga tayanishi mumkin. Qarang: pastdagi izoh.
     TEMPLATE_PARTS = {1: (1, 8), 2: (9, 14), 3: (15, 18), 4: (19, 23), 5: (24, 29), 6: (30, 35)}
     TEMPLATE_ORDERED = True
     _QUESTION_MODEL = ListeningQuestion
@@ -52,6 +61,62 @@ class ListeningService(PaperVersionedExamMixin):
 
     def __init__(self, db: AsyncSession):
         self.db = db
+
+    # ================================================================
+    #  STRUCTURE VALIDATION (qat'iy shablon o'rniga umumiy qoida)
+    # ================================================================
+    def _validate_template_structure(self, parts, is_practice: bool = False):
+        """Formal (is_practice=False) test tuzilmasini tekshiradi.
+
+        Qoidalar:
+          - qismlar soni 6 va part_number lari 1..6 (takrorsiz);
+          - har bir qismda kamida bitta savol, savol raqamlari uzluksiz;
+          - barcha savol raqamlari 1..35 oralig'ida, takrorsiz, bo'shliqsiz;
+          - qismlar savol raqamlari bo'yicha ketma-ket (1-qism oldin, 2-qism keyin...).
+
+        Practice (qisman) testlar erkin qabul qilinadi.
+        """
+        if is_practice:
+            return
+
+        ordered = sorted(parts, key=lambda p: p.part_number)
+        part_numbers = [p.part_number for p in ordered]
+        if part_numbers != list(range(1, FORMAL_PART_COUNT + 1)):
+            raise HTTPException(
+                422,
+                detail=f"Formal testda {FORMAL_PART_COUNT} ta qism bo'lishi kerak "
+                       f"(part_number 1..{FORMAL_PART_COUNT}). Hozir: {part_numbers}",
+            )
+
+        all_numbers: list[int] = []
+        previous_last = 0
+        for part in ordered:
+            numbers = sorted(q.question_number for q in part.questions)
+            if not numbers:
+                raise HTTPException(422, detail=f"Part {part.part_number} da savol yo'q")
+            first, last = numbers[0], numbers[-1]
+            if numbers != list(range(first, last + 1)):
+                raise HTTPException(
+                    422,
+                    detail=f"Part {part.part_number} savol raqamlari uzluksiz emas: {numbers}",
+                )
+            if first <= previous_last:
+                raise HTTPException(
+                    422,
+                    detail=f"Part {part.part_number} savollari oldingi qismlar bilan kesishadi",
+                )
+            previous_last = last
+            all_numbers.extend(numbers)
+
+        expected = list(range(1, FORMAL_TOTAL_QUESTIONS + 1))
+        if sorted(all_numbers) != expected:
+            missing = sorted(set(expected) - set(all_numbers))
+            duplicated = sorted({n for n in all_numbers if all_numbers.count(n) > 1})
+            raise HTTPException(
+                422,
+                detail=f"Savol raqamlari 1..{FORMAL_TOTAL_QUESTIONS} bo'yicha to'liq emas. "
+                       f"Yetishmaydi: {missing}, takrorlangan: {duplicated}",
+            )
 
     async def _load_exam_or_404(self, exam_id: str):
         exam = await self.get_exam_by_id(exam_id)
@@ -122,7 +187,7 @@ class ListeningService(PaperVersionedExamMixin):
         questions = await self._question_dicts_for_paper(exam_id)
         return await self._paper_service(exam_id).lock(questions, locked_by_user_id, partial=partial)
 
-        # ================================================================
+    # ================================================================
     #  PAPER PDF (module-specific)
     # ================================================================
     async def generate_paper_pdf(self, exam_id: str) -> bytes:
@@ -192,14 +257,19 @@ class ListeningService(PaperVersionedExamMixin):
                 audio_end_seconds=p_data.audio_end_seconds,
                 context=p_data.context,
                 passage=p_data.passage,
-                map_image=p_data.map_image
+                map_image=p_data.map_image,
             )
             self.db.add(new_part)
             await self.db.flush()
 
             if p_data.options:
                 for opt_index, opt in enumerate(p_data.options, start=1):
-                    self.db.add(ListeningPartOption(part_id=new_part.id, external_id=opt.external_id or str(uuid.uuid4()), value=opt.value, label=opt.label))
+                    self.db.add(ListeningPartOption(
+                        part_id=new_part.id,
+                        external_id=opt.external_id or str(uuid.uuid4()),
+                        value=opt.value,
+                        label=opt.label,
+                    ))
 
             for q_index, q_data in enumerate(p_data.questions, start=1):
                 new_q = ListeningQuestion(
@@ -207,15 +277,20 @@ class ListeningService(PaperVersionedExamMixin):
                     external_id=q_data.external_id or str(uuid.uuid4()),
                     question_number=q_data.question_number,
                     type=q_data.type,
-                    text=q_data.text, 
-                    correct_answer=q_data.correct_answer
+                    text=q_data.text,
+                    correct_answer=q_data.correct_answer,
                 )
                 self.db.add(new_q)
                 await self.db.flush()
 
                 if q_data.options:
                     for opt_index, opt in enumerate(q_data.options, start=1):
-                        self.db.add(ListeningQuestionOption(question_id=new_q.id, external_id=opt.external_id or str(uuid.uuid4()), value=opt.value, label=opt.label))
+                        self.db.add(ListeningQuestionOption(
+                            question_id=new_q.id,
+                            external_id=opt.external_id or str(uuid.uuid4()),
+                            value=opt.value,
+                            label=opt.label,
+                        ))
 
     # ================================================================
     #  CRUD METHODS
@@ -264,7 +339,7 @@ class ListeningService(PaperVersionedExamMixin):
 
     async def create_exam(self, data: ListeningExamCreate):
         try:
-            # Faqat to'liq 5 ta part bo'lgan formal exam uchun qat'iy tekshiriladi.
+            # Faqat to'liq formal exam uchun qat'iy tekshiriladi.
             # Qismlarga ajratilgan yoki practice testlar erkin qabul qilinadi.
             # Partlar part_number bo'yicha tartiblanadi; part-only test practice sanaladi.
             data.parts = sorted(data.parts, key=lambda part: part.part_number)
@@ -272,8 +347,7 @@ class ListeningService(PaperVersionedExamMixin):
                 data.is_practice = True
             self._validate_template_structure(data.parts, is_practice=data.is_practice)
             # Audio draft bosqichida majburiy emas. Final PDF/OMR uchun /lock audio
-            # konfiguratsiyasini qat'iy tekshiradi. Bu JSON importni audio keyinroq
-            # yuklanadigan normal admin workflowga moslashtiradi.
+            # konfiguratsiyasini qat'iy tekshiradi.
             # Auto-generate ID — client never supplies it
             exam_id = data.id or generate_listening_id()
             if data.id and await self.db.get(ListeningTest, exam_id):
@@ -292,11 +366,11 @@ class ListeningService(PaperVersionedExamMixin):
                 audio_url=data.audio_url,
                 cefr_level=data.cefr_level,
                 duration_minutes=data.duration_minutes,
-                total_questions=total_questions
+                total_questions=total_questions,
             )
             self.db.add(new_exam)
-            await self.db.flush() 
-            
+            await self.db.flush()
+
             await self._create_structure(new_exam.id, data.parts)
             await self.db.commit()
             return await self.get_exam_by_id(new_exam.id)
@@ -351,7 +425,7 @@ class ListeningService(PaperVersionedExamMixin):
         new_count = 0
         part_count = len(ordered_parts)
 
-        for position, part in enumerate(ordered_parts, start=1):
+        for part in ordered_parts:
             mini = existing.get(part.part_number)
             if mini is not None:
                 created_ids.append(mini.id)
@@ -460,7 +534,7 @@ class ListeningService(PaperVersionedExamMixin):
         stmt = select(ListeningTest).where(ListeningTest.id == exam_id).options(
             selectinload(ListeningTest.parts).options(
                 selectinload(ListeningPart.questions).selectinload(ListeningQuestion.options),
-                selectinload(ListeningPart.options)
+                selectinload(ListeningPart.options),
             )
         )
         res = await self.db.execute(stmt)
@@ -474,8 +548,7 @@ class ListeningService(PaperVersionedExamMixin):
         if not exam:
             raise HTTPException(404, detail="Imtihon topilmadi")
 
-        # Create'dagi kabi: 6 part / 35 savol shabloni buzilgan holda saqlashga
-        # yo'l qo'ymaymiz (aks holda test keyin lock/PDF/OMR'dan o'tmaydi).
+        # Create'dagi kabi: qism/savol shablonini buzilgan holda saqlamaymiz.
         if data.parts is not None:
             data.parts = sorted(data.parts, key=lambda part: part.part_number)
             practice = data.is_practice if getattr(data, "is_practice", None) is not None else exam.is_practice
@@ -558,25 +631,23 @@ class ListeningService(PaperVersionedExamMixin):
         )
         result = await self.db.execute(stmt)
         return result.scalars().all()
-    
+
     async def get_result_with_review(self, result_id: int, user_id: uuid.UUID):
-        """
-        Natija va savollar tahlilini qaytarish (Logdagi xatoni tuzatuvchi metod)
-        """
+        """Natija va savollar tahlilini qaytarish."""
         stmt = select(ListeningResult).where(
-            ListeningResult.id == result_id, 
-            ListeningResult.user_id == user_id
+            ListeningResult.id == result_id,
+            ListeningResult.user_id == user_id,
         )
         res = await self.db.execute(stmt)
         result_data = res.scalar_one_or_none()
-        
+
         if not result_data:
-            return None 
+            return None
 
         exam = await self.get_exam_by_id(result_data.exam_id)
         if not exam:
             return None
-        
+
         review_data = []
         for part in exam.parts:
             for q in part.questions:
@@ -585,19 +656,19 @@ class ListeningService(PaperVersionedExamMixin):
                 valid_options = [a.strip() for a in c_ans_raw.split("/") if a.strip()]
 
                 is_correct = bool(u_ans) and u_ans in valid_options
-                
+
                 review_data.append({
                     "question_id": q.id,
                     "question_number": q.question_number,
                     "user_answer": result_data.user_answers.get(str(q.question_number), ""),
                     "correct_answer": q.correct_answer,
                     "is_correct": is_correct,
-                    "type": q.type
+                    "type": q.type,
                 })
-                
+
         return {
             "summary": result_data,
-            "review": review_data
+            "review": review_data,
         }
 
     # ================================================================
@@ -610,11 +681,8 @@ class ListeningService(PaperVersionedExamMixin):
         # IDOR FIX: mirrors reading_test._update_mock_reading — `exam_attempt_id`
         # is client-supplied (ListeningSubmission), so without the `user_id`
         # filter any authenticated user could overwrite another student's
-        # Listening skill score (and potentially trigger finalization of that
-        # student's attempt) by guessing/enumerating attempt IDs. Filtering on
-        # MockSkillAttempt.user_id (set from the real owner at attempt
-        # creation) restricts this to the caller's own skill row; a mismatch
-        # now behaves like "not found", same as the existing `if skill:` path.
+        # Listening skill score. Filtering on MockSkillAttempt.user_id restricts
+        # this to the caller's own skill row.
         stmt = select(MockSkillAttempt).where(
             MockSkillAttempt.attempt_id == exam_attempt_id,
             MockSkillAttempt.skill == SkillType.LISTENING,
