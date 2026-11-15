@@ -44,6 +44,8 @@ from app.modules.tests.writing.router import router as writing_router, admin_rou
 from app.modules.tests.speaking.router import router as speaking_router, admin_router as admin_speaking_router, evaluator_router as evaluator_speaking_router
 from app.modules.practice.router import router as practice_router
 from app.modules.admin.router import router as admin_router
+from app.modules.admin.stats_router import router as admin_stats_router
+from app.modules.activity.router import router as activity_router
 from app.modules.billing.router import router as billing_router, admin_router as admin_billing_router
 from app.modules.analysis.router import router as analysis_router, admin_router as admin_analysis_router
 from app.modules.exams.auth.router import router as exams_auth_router, exams_router
@@ -217,6 +219,7 @@ api_routers = (
     analysis_router, admin_analysis_router,
     exams_auth_router, exams_router, apply_router, answer_sheets_router,
     onboarding_router, admin_onboarding_router,
+    activity_router, admin_stats_router,
 )
 for router in api_routers:
     app.include_router(router, prefix="/api/v1")

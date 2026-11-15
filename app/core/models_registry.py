@@ -15,3 +15,4 @@ from app.modules.billing import models as _billing_models  # noqa: F401
 from app.modules.exams.auth import models as _exams_auth_models  # noqa: F401
 from app.modules.tests.speaking import ai_models as _speaking_ai_models  # noqa: F401
 from app.modules.onboarding import models as _onboarding_models  # noqa: F401
+from app.modules.activity import models as _activity_models  # noqa: F401
