@@ -305,7 +305,9 @@ class AuthService:
     # REGISTER — 2-QADAM: kodni tasdiqlab, userni yaratish
     # =====================================================
 
-    async def register_verify(self, phone: str, code: str, request: Request) -> RegisterResponse:
+    async def register_verify(
+        self, phone: str, code: str, request: Request, referral_code: Optional[str] = None
+    ) -> RegisterResponse:
         await self._require_sms_registration_enabled()
         pending = (await self.db.execute(
             select(VerificationCode)
@@ -403,6 +405,9 @@ class AuthService:
         except IntegrityError as exc:
             raise HTTPException(409, "Ro'yxatdan o'tishda ziddiyat yuz berdi, qayta urinib ko'ring") from exc
 
+        # Referal: taklif qilingan user sifatida bog'lanadi (mukofot onboarding tugaganda)
+        from app.modules.referral.service import attach_referral
+        await attach_referral(self.db, user.id, referral_code)
         full_user = await self._get_user_full(user.id)
         tokens = await self._create_session_and_tokens(full_user, request)
         return RegisterResponse(status="success", token=tokens)

@@ -19,6 +19,7 @@ from sqlalchemy.exc import IntegrityError
 from app.modules.auth.models import User
 
 from .models import GlobalPracticeUsageLog, SubscriptionPlan, SubscriptionTier, TierPracticeLimit, UserSubscription
+from .tier_config import test_tier_access, tier_skill_enabled
 
 SKILLS = ("READING", "LISTENING", "WRITING", "SPEAKING")
 PRODUCT_TIMEZONE = ZoneInfo("Asia/Tashkent")
@@ -41,7 +42,7 @@ async def plan_allows_skill(db: AsyncSession, user_id, skill: str) -> bool:
     """Barcha faol obunalar ko'nikmalarining birlashmasi (obunalar qo'shiladi)."""
     subs = await get_active_subscriptions(db, user_id)
     if not subs:
-        return skill in TIER_SKILLS[SubscriptionTier.FREE]
+        return await tier_skill_enabled(db, SubscriptionTier.FREE, skill)
     for sub in subs:
         plan = await db.get(SubscriptionPlan, sub.plan_id)
         if plan is None:
@@ -147,7 +148,10 @@ async def ensure_practice_access(db: AsyncSession, user_id, test, skill: str) ->
         raise HTTPException(404, "Practice testi topilmadi")
     if not await plan_allows_skill(db, user_id, skill):
         raise HTTPException(403, f"{skill} faqat Pro obunasida mavjud" if skill == "SPEAKING" else f"{skill} sizning tarifingizda mavjud emas")
-    if tier == SubscriptionTier.FREE and not bool(getattr(test, "is_free", False)):
+    managed = await test_tier_access(db, tier, skill, test.id)
+    if managed is False:
+        raise HTTPException(403, "Bu practice testi sizning tarifingizda mavjud emas")
+    if managed is None and tier == SubscriptionTier.FREE and not bool(getattr(test, "is_free", False)):
         raise HTTPException(403, "Bu practice testi Plus yoki Pro obunasini talab qiladi")
     return tier
 
@@ -201,10 +205,15 @@ async def enforce_practice_limit(
     exists = await db.scalar(existing_stmt)
     if exists is not None:
         return
-    if weekly_limit is not None and await _count_week(db, user_id, week_start) >= weekly_limit:
-        raise HTTPException(429, f"Bu hafta uchun umumiy practice limiti ({weekly_limit} ta) tugadi")
-    if monthly_limit is not None and await _count_month(db, user_id) >= monthly_limit:
-        raise HTTPException(429, f"Bu oy uchun umumiy practice limiti ({monthly_limit} ta) tugadi")
+    week_over = weekly_limit is not None and await _count_week(db, user_id, week_start) >= weekly_limit
+    month_over = monthly_limit is not None and await _count_month(db, user_id) >= monthly_limit
+    if week_over or month_over:
+        # Limit tugadi: referal bonus krediti bo'lsa, shu bilan o'tkaziladi
+        from app.modules.referral.service import consume_bonus_credit
+        if not await consume_bonus_credit(db, user_id):
+            if week_over:
+                raise HTTPException(429, f"Bu hafta uchun umumiy practice limiti ({weekly_limit} ta) tugadi")
+            raise HTTPException(429, f"Bu oy uchun umumiy practice limiti ({monthly_limit} ta) tugadi")
     db.add(GlobalPracticeUsageLog(user_id=user_id, skill=skill, test_id=str(test_id), attempt_id=attempt_id, week_start=week_start))
     await db.flush()
 

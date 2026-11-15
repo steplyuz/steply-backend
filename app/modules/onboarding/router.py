@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.modules.auth.dependencies import get_current_user, require_role
 from app.modules.auth.models import User, UserRole
+from app.modules.referral import service as referral_service
 
 from . import service
 from .models import ExamDate
@@ -58,7 +59,11 @@ async def update_onboarding(
     if data.get("exam_date_pending"):
         await service.ensure_pending_allowed(db)
     profile = await service.get_or_create_profile(db, user.id)
+    was_complete = profile.completed_at is not None
     service.apply_update(profile, data)
+    # To'liq ro'yxatdan o'tish (onboarding tugadi): referal mukofoti shu paytda beriladi
+    if not was_complete and profile.completed_at is not None:
+        await referral_service.qualify_referral(db, user.id)
     await db.commit()
     return _to_response(profile)
 

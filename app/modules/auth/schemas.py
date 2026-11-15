@@ -63,6 +63,8 @@ class RegisterInitResponse(BaseModel):
 class RegisterVerifyRequest(BaseModel):
     phone: str
     code: str = Field(pattern=OTP_CODE_PATTERN)
+    # Ixtiyoriy: taklif qilgan do'stning referal kodi
+    referral_code: Optional[str] = Field(default=None, max_length=32)
 
     _normalize_phone = field_validator("phone")(_phone_validator)
 

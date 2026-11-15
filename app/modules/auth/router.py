@@ -173,7 +173,7 @@ async def register_verify(
     response: Response,
     service: AuthService = Depends(get_service),
 ):
-    result = await service.register_verify(data.phone, data.code, request)
+    result = await service.register_verify(data.phone, data.code, request, referral_code=data.referral_code)
     if result.status == "success" and result.token:
         set_auth_cookies(response, result.token)
     return result
