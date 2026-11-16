@@ -11,6 +11,6 @@ router = APIRouter(prefix="/referral", tags=["Referral"])
 
 @router.get("/me")
 async def my_referral(user: User = Depends(get_current_user), db: AsyncSession = Depends(get_db)):
+    # ensure_code ichida flush() chaqiriladi; get_db() dependency tranzaksiyani o'zi commit qiladi.
     data = await service.user_summary(db, user.id)
-    await db.commit()
     return data

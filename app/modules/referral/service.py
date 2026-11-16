@@ -71,11 +71,25 @@ async def attach_referral(db: AsyncSession, referred_id: uuid.UUID, raw_code: st
 
 
 async def qualify_referral(db: AsyncSession, referred_id: uuid.UUID) -> Referral | None:
-    """Taklif qilingan user to'liq ro'yxatdan o'tganda (onboarding tugaganda) chaqiriladi. Faqat bir marta mukofot beradi."""
-    ref = await db.scalar(
-        select(Referral).where(Referral.referred_id == referred_id, Referral.status == STATUS_PENDING)
-    )
+    """Taklif qilingan user to'liq ro'yxatdan o'tganda (onboarding tugaganda) chaqiriladi.
+
+    Faqat bir marta mukofot beradi.
+
+    Race condition himoyasi: referral qatori `with_for_update()` bilan qulflanadi.
+    Parallel ikki onboarding so'rovi bir vaqtda kelsa, biri qulfni oladi va
+    statusni o'zgartiradi; ikkinchisi qulfni olganda status allaqachon PENDING emas —
+    shuning uchun mukofot ikki marta berilmaydi.
+    SQLite'da FOR UPDATE hint'i ishlamaydi, lekin WAL + busy_timeout
+    yozuv ziddiyatlarini seriallashtiradi; PostgreSQL'ga o'tilganda to'liq himoya.
+    """
+    # Referral qatorini atomik band qilamiz — status PENDING bo'lgandagina
+    ref = (await db.execute(
+        select(Referral)
+        .where(Referral.referred_id == referred_id, Referral.status == STATUS_PENDING)
+        .with_for_update(skip_locked=True)
+    )).scalar_one_or_none()
     if ref is None:
+        # Yo'q (hech qachon ro'yxatdan o'tmagan) yoki boshqa so'rov allaqachon qayta ishlayapti
         return None
     settings = await get_settings(db)
     if not settings.enabled:
@@ -83,6 +97,7 @@ async def qualify_referral(db: AsyncSession, referred_id: uuid.UUID) -> Referral
 
     now = _now()
     if settings.max_rewards_per_user is not None:
+        # Bu yerda ham qulflangan referrer satrlari soni atomik hisoblanadi
         done = await db.scalar(
             select(func.count(Referral.id)).where(
                 Referral.referrer_id == ref.referrer_id, Referral.status == STATUS_QUALIFIED

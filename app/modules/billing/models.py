@@ -33,12 +33,17 @@ class SubscriptionTier(str, Enum):
     FREE hech qanday `UserSubscription` talab qilmaydi — bu faol
     (is_active + start_date <= now < end_date) obunasi bo'lmagan HAR BIR foydalanuvchi
     uchun standart holat (qarang: entitlements.get_user_tier).
+
+    Eslatma: oldingi APIda PREMIUM = "plus" alias sifatida ishlatilgan edi.
+    Migratsiya davomida DB'dagi "plus" qiymatlari o'zgarishsiz qoladi.
     """
     FREE = "free"
     PLUS = "plus"
-    # Backward-compatible product label used by the previous billing API.
-    PREMIUM = "plus"
     PRO = "pro"
+
+
+# Orqaga moslik uchun konstantа — DBga yozilmaydi, faqat kod ichida import uchun
+LEGACY_PREMIUM = SubscriptionTier.PLUS
 
 
 class SubscriptionPlan(Base):

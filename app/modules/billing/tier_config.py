@@ -1,7 +1,7 @@
 """Admin boshqaradigan tarif sozlamalari: tarif -> skill ruxsati, tarif -> test ruxsati.
 
 Qoidalar:
-* tier_skill_access: qatorlar bo'lsa shu ishlatiladi, aks holda TIER_SKILLS_DEFAULT.
+* tier_skill_access: qatorlar bo'lsa shu ishlatiladi, aks holda DEFAULT_SKILLS (tier_config.py ichida) ishlatiladi.
 * tier_test_access: test uchun qator bo'lsa, test faqat shu tarif(lar)ga ochiq
   (yuqori tarif quyi tarifning testlarini ham ochadi). Qator bo'lmasa — eski qoida
   (FREE faqat is_free testlar, pullik tariflar hammasini).

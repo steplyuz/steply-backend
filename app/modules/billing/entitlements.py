@@ -24,32 +24,39 @@ from .tier_config import test_tier_access, tier_skill_enabled
 SKILLS = ("READING", "LISTENING", "WRITING", "SPEAKING")
 PRODUCT_TIMEZONE = ZoneInfo("Asia/Tashkent")
 
-# Qaysi tarif qaysi ko'nikmani ocha oladi. Pulik testlar barcha pulik obunaga kiradi
-# (PLUS va PRO); FREE faqat is_free testlarni ochadi.
-TIER_SKILLS: dict[SubscriptionTier, frozenset[str]] = {
-    SubscriptionTier.FREE: frozenset({"READING", "LISTENING", "WRITING"}),
-    SubscriptionTier.PLUS: frozenset({"READING", "LISTENING", "WRITING", "SPEAKING"}),
-    SubscriptionTier.PRO: frozenset({"READING", "LISTENING", "WRITING", "SPEAKING"}),
-}
-
-
-def tier_allows_skill(tier: SubscriptionTier, skill: str) -> bool:
-    # Fallback uchun; haqiqiy obuna tekshiruvi ensure_practice_access ichida tarif bo‘yicha.
-    return skill in TIER_SKILLS.get(tier, frozenset())
-
 
 async def plan_allows_skill(db: AsyncSession, user_id, skill: str) -> bool:
-    """Barcha faol obunalar ko'nikmalarining birlashmasi (obunalar qo'shiladi)."""
-    subs = await get_active_subscriptions(db, user_id)
-    if not subs:
+    """Barcha faol obunalar ko'nikmalarining birlashmasi — N+1 so'rovsiz.
+
+    Skill ruxsati tartibi (admin tomonidan to'liq boshqariladi):
+      1. plan.included_skills (JSON) — plan yaratilganda admin belgilagan skills ro'yxati;
+      2. tier_config (TierSkillAccess DB jadvali) — admin boshqaradigan tarif matritsasi;
+      3. tier_config.DEFAULT_SKILLS — DB jadvalida qator bo'lmasa standart fallback.
+    """
+    now = datetime.now(timezone.utc)
+    rows = (await db.execute(
+        select(UserSubscription, SubscriptionPlan)
+        .join(SubscriptionPlan, UserSubscription.plan_id == SubscriptionPlan.id)
+        .where(
+            UserSubscription.user_id == user_id,
+            UserSubscription.is_active.is_(True),
+            UserSubscription.start_date <= now,
+            UserSubscription.end_date > now,
+        )
+    )).all()
+
+    if not rows:
         return await tier_skill_enabled(db, SubscriptionTier.FREE, skill)
-    for sub in subs:
-        plan = await db.get(SubscriptionPlan, sub.plan_id)
-        if plan is None:
-            continue
+
+    skill_upper = skill.upper()
+    for _sub, plan in rows:
         configured = getattr(plan, "included_skills", None)
-        if skill in (configured or TIER_SKILLS.get(plan.tier, frozenset())):
-            return True
+        if configured:
+            if skill_upper in [s.upper() for s in configured]:
+                return True
+        else:
+            if await tier_skill_enabled(db, plan.tier, skill_upper):
+                return True
     return False
 
 
