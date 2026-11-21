@@ -70,6 +70,20 @@ class SmsService:
             raise RuntimeError(f"SMS xato ({response.status_code})")
 
     @classmethod
+    async def send_text(cls, phone: str, message: str, sender: str | None = None) -> None:
+        """Ixtiyoriy matnli SMS (notification servisi uchun). Xato bo'lsa RuntimeError."""
+        phone = cls._normalize_phone(phone)
+        token = await cls._get_token()
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
+                cls.SMS_URL,
+                json={"mobile_phone": phone, "message": message, "from": sender or settings.RESULT_SMS_SENDER},
+                headers={"Authorization": f"Bearer {token}"},
+            )
+        if response.status_code != 200:
+            raise RuntimeError(f"SMS xato ({response.status_code})")
+
+    @classmethod
     async def send_result_ready(cls, phone: str) -> None:
         """Natija tayyor SMS ni async tarzda yuboradi."""
         phone = cls._normalize_phone(phone)

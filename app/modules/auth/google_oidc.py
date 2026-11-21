@@ -99,6 +99,8 @@ class GoogleOIDCService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.auth = AuthService(db)
+        # True faqat shu so'rovda YANGI user yaratilganda (referal bog'lash uchun)
+        self.created_now = False
 
     @staticmethod
     def _clear_cookie(response) -> None:
@@ -135,7 +137,7 @@ class GoogleOIDCService:
         )
         return {"nonce": nonce, "client_id": settings.GOOGLE_CLIENT_ID}
 
-    async def verify(self, *, request: Request, response, id_token: str) -> Token:
+    async def verify(self, *, request: Request, response, id_token: str, referral_code: str | None = None) -> Token:
         if not settings.GOOGLE_CLIENT_ID:
             raise HTTPException(503, "Google authentication is not configured")
         secret = request.cookies.get(STATE_COOKIE)
@@ -164,6 +166,12 @@ class GoogleOIDCService:
         if not user.is_active:
             self._clear_cookie(response)
             raise HTTPException(403, "Hisob faol emas")
+        if self.created_now:
+            # Referal: faqat yangi akkauntga bog'lanadi (mavjud userlar kod orqali mukofot ololmaydi)
+            from app.modules.referral.service import attach_referral
+            await attach_referral(self.db, user.id, referral_code)
+            from app.modules.notifications.service import emit_event
+            await emit_event(self.db, "user_registered", user_id=user.id, ref=f"user-{user.id}")
         user.last_login_at = _now()
         token = await self.auth._create_session_and_tokens(user, request)
         self._clear_cookie(response)
@@ -265,6 +273,7 @@ class GoogleOIDCService:
             if existing is None:
                 raise HTTPException(409, "Google account could not be linked")
             return existing
+        self.created_now = True
         return user
 
     async def _link(self, user_id, sub: str) -> User:

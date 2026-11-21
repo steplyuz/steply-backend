@@ -109,6 +109,19 @@ class Settings(BaseSettings):
     RESULT_SMS_ENABLED: bool = False
     RESULT_SMS_SENDER: str = "4546"
 
+    # --- Xabarnomalar: email (Resend API) ----------------------------------
+    RESEND_API_KEY: str = ""
+    RESEND_API_BASE: str = "https://api.resend.com"
+    # Masalan: "Steply <no-reply@steply.uz>" (domen Resend'da tasdiqlangan bo'lishi kerak)
+    RESEND_FROM_EMAIL: str = ""
+
+    # --- Gmail (OAuth) ulash ----------------------------------------------
+    GOOGLE_CLIENT_SECRET: str = ""
+    # Google Console'da ro'yxatga olingan redirect (API domeni): .../api/v1/admin/notifications/email-accounts/gmail/callback
+    GMAIL_REDIRECT_URI: str = ""
+    # API ning ommaviy manzili (unsubscribe havolalari uchun), masalan https://api.steply.uz
+    API_PUBLIC_URL: str = ""
+
     # --- Exams (nomzod) kirishi ---------------------------------------------
     # MK ID (MK-DDMMYY-NNN) tug'ilgan sanadan va 3 ta tasodifiy raqamdan iborat,
     # ya'ni har sana uchun faqat 1000 variant. Shuning uchun uni yagona kalit

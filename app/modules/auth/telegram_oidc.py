@@ -280,6 +280,8 @@ class TelegramOIDCService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.auth = AuthService(db)
+        # True faqat shu so'rovda YANGI user yaratilganda (referal bog'lash uchun)
+        self.created_now = False
 
     async def start(self, response) -> str:
         if not all(
@@ -463,7 +465,9 @@ class TelegramOIDCService:
         # client_id is public (it is the `aud` of every id_token).
         return {"nonce": nonce, "client_id": str(settings.TELEGRAM_CLIENT_ID)}
 
-    async def verify_popup(self, *, request: Request, response, id_token: str) -> Token:
+    async def verify_popup(
+        self, *, request: Request, response, id_token: str, referral_code: str | None = None
+    ) -> Token:
         browser_secret = request.cookies.get(STATE_COOKIE)
         if not browser_secret or not id_token:
             self._clear_state_cookie(response)
@@ -509,6 +513,12 @@ class TelegramOIDCService:
         if not user.is_active:
             self._clear_state_cookie(response)
             raise HTTPException(403, "Hisob faol emas")
+        if self.created_now:
+            # Referal: faqat yangi akkauntga bog'lanadi (mavjud userlar kod orqali mukofot ololmaydi)
+            from app.modules.referral.service import attach_referral
+            await attach_referral(self.db, user.id, referral_code)
+            from app.modules.notifications.service import emit_event
+            await emit_event(self.db, "user_registered", user_id=user.id, ref=f"user-{user.id}")
         user.last_login_at = _now()
         token = await self.auth._create_session_and_tokens(user, request)
 
@@ -689,6 +699,7 @@ class TelegramOIDCService:
                 raise HTTPException(409, "Telegram account could not be linked")
             return await self.auth._get_user_full(identity.user_id)
 
+        self.created_now = True
         return user
 
     async def _consume_popup_nonce(self, request: Request, response) -> str:

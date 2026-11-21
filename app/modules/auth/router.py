@@ -103,7 +103,7 @@ async def telegram_login_verify(
 ):
     """Popup flow, step 2: validate the id_token and open our own cookie session."""
     token = await TelegramOIDCService(db).verify_popup(
-        request=request, response=response, id_token=data.id_token
+        request=request, response=response, id_token=data.id_token, referral_code=data.referral_code,
     )
     set_auth_cookies(response, token)
     return StatusResponse(status="success", message="Telegram orqali kirildi")
@@ -126,7 +126,9 @@ async def google_login_verify(
     request: Request, response: Response, data: GoogleVerifyRequest, db: AsyncSession = Depends(get_db),
 ):
     """Google, 2-qadam: id_token'ni tekshirib, o'z cookie sessiyamizni ochadi."""
-    token = await GoogleOIDCService(db).verify(request=request, response=response, id_token=data.id_token)
+    token = await GoogleOIDCService(db).verify(
+        request=request, response=response, id_token=data.id_token, referral_code=data.referral_code,
+    )
     set_auth_cookies(response, token)
     return StatusResponse(status="success", message="Google orqali kirildi")
 

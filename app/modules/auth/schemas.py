@@ -23,10 +23,14 @@ class StatusResponse(BaseModel):
 class TelegramVerifyRequest(BaseModel):
     """id_token returned by telegram-login.js (popup flow)."""
     id_token: str = Field(min_length=20, max_length=8192)
+    # Ixtiyoriy: taklif qilgan do'stning referal kodi (faqat YANGI akkaunt yaratilganda qo'llanadi)
+    referral_code: Optional[str] = Field(default=None, max_length=32)
 
 class GoogleVerifyRequest(BaseModel):
     """`credential` (id_token) — Google Identity Services callback'idan."""
     id_token: str = Field(min_length=20, max_length=8192)
+    # Ixtiyoriy: taklif qilgan do'stning referal kodi (faqat YANGI akkaunt yaratilganda qo'llanadi)
+    referral_code: Optional[str] = Field(default=None, max_length=32)
 
 class PhoneLoginRequest(BaseModel):
     phone: str

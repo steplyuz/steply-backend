@@ -1,4 +1,5 @@
 """Admin: referal sozlamalari, statistika va ro'yxat."""
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -11,7 +12,7 @@ from app.modules.auth.dependencies import require_role
 from app.modules.auth.models import User, UserProfile, UserRole
 from app.modules.billing.models import SubscriptionPlan
 from app.modules.referral import service
-from app.modules.referral.models import Referral, ReferralCredit
+from app.modules.referral.models import Referral, ReferralCode, ReferralCredit
 
 router = APIRouter(prefix="/admin/referral", tags=["Admin Referral"])
 ADMIN_ROLES = (UserRole.ADMIN, UserRole.SUPER_ADMIN)
@@ -84,7 +85,7 @@ async def referral_stats(db: AsyncSession = Depends(get_db), _: User = Depends(r
 
 @router.get("/referrals")
 async def list_referrals(
-    status: Optional[str] = Query(None, pattern="^(pending|qualified|capped)$"),
+    status: Optional[str] = Query(None, pattern="^(pending|qualified|capped|voided)$"),
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -115,3 +116,126 @@ async def list_referrals(
             "qualified_at": r.qualified_at,
         } for r in refs],
     }
+
+
+# ---------- User bo'yicha to'liq boshqaruv ----------
+
+class ReferralCreditAdjustIn(BaseModel):
+    delta: int = Field(..., ge=-1000, le=1000, description="Musbat: qo'shish, manfiy: ayirish")
+    note: str = Field(min_length=3, max_length=200)
+
+
+class ReferralVoidIn(BaseModel):
+    reason: str = Field(min_length=3, max_length=200)
+
+
+def _ref_row(r: Referral) -> dict:
+    return {
+        "id": r.id,
+        "referrer_id": str(r.referrer_id),
+        "referred_id": str(r.referred_id),
+        "status": r.status,
+        "created_at": r.created_at,
+        "qualified_at": r.qualified_at,
+    }
+
+
+def _credit_row(c: ReferralCredit) -> dict:
+    return {
+        "id": c.id,
+        "amount_total": c.amount_total,
+        "amount_remaining": c.amount_remaining,
+        "expires_at": c.expires_at,
+        "referral_id": c.referral_id,
+        "reason": c.reason,
+        "created_at": c.created_at,
+    }
+
+
+def _parse_uuid(value: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except ValueError as exc:
+        raise HTTPException(422, "user_id noto'g'ri") from exc
+
+
+@router.get("/users/{user_id}")
+async def referral_user_detail(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role(*ADMIN_ROLES)),
+):
+    uid = _parse_uuid(user_id)
+    if await db.get(User, uid) is None:
+        raise HTTPException(404, "Foydalanuvchi topilmadi")
+    summary = await service.user_summary(db, uid)
+    referred_by = await db.scalar(select(Referral).where(Referral.referred_id == uid))
+    referrals = (await db.execute(
+        select(Referral).where(Referral.referrer_id == uid).order_by(Referral.id.desc()).limit(100)
+    )).scalars().all()
+    credits = (await db.execute(
+        select(ReferralCredit).where(ReferralCredit.user_id == uid).order_by(ReferralCredit.id.desc()).limit(100)
+    )).scalars().all()
+    return {
+        "user_id": str(uid),
+        "summary": summary,
+        "referred_by": _ref_row(referred_by) if referred_by else None,
+        "referrals": [_ref_row(r) for r in referrals],
+        "credits": [_credit_row(c) for c in credits],
+    }
+
+
+@router.post("/users/{user_id}/credits")
+async def adjust_referral_credits(
+    user_id: str,
+    payload: ReferralCreditAdjustIn,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role(*ADMIN_ROLES)),
+):
+    uid = _parse_uuid(user_id)
+    if await db.get(User, uid) is None:
+        raise HTTPException(404, "Foydalanuvchi topilmadi")
+    if payload.delta == 0:
+        raise HTTPException(422, "delta 0 bo'lmasligi kerak")
+    try:
+        await service.adjust_credits(db, uid, payload.delta, payload.note)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    await db.commit()
+    return {"user_id": str(uid), "delta": payload.delta, "summary": await service.user_summary(db, uid)}
+
+
+@router.post("/users/{user_id}/reset-code")
+async def reset_referral_code(
+    user_id: str,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role(*ADMIN_ROLES)),
+):
+    """Eski kodni bekor qilib yangi kod beradi (suiiste'mol bo'lsa)."""
+    uid = _parse_uuid(user_id)
+    if await db.get(User, uid) is None:
+        raise HTTPException(404, "Foydalanuvchi topilmadi")
+    old = await db.scalar(select(ReferralCode).where(ReferralCode.user_id == uid))
+    if old is not None:
+        await db.delete(old)
+        await db.flush()
+    code = await service.ensure_code(db, uid)
+    await db.commit()
+    return {"user_id": str(uid), "code": code}
+
+
+@router.post("/referrals/{referral_id}/void")
+async def void_referral_endpoint(
+    referral_id: int,
+    payload: ReferralVoidIn,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role(*ADMIN_ROLES)),
+):
+    ref = await db.get(Referral, referral_id)
+    if ref is None:
+        raise HTTPException(404, "Referal topilmadi")
+    if ref.status == service.STATUS_VOIDED:
+        raise HTTPException(409, "Referal allaqachon bekor qilingan")
+    await service.void_referral(db, ref, payload.reason)
+    await db.commit()
+    return _ref_row(ref)

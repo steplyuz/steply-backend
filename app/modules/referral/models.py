@@ -74,10 +74,12 @@ class ReferralCredit(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True, native_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
     )
-    referral_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("referrals.id", ondelete="CASCADE"), unique=True, nullable=False
+    # None = admin qo'lda bergan kredit (referal bilan bog'liq emas)
+    referral_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("referrals.id", ondelete="CASCADE"), unique=True, nullable=True
     )
     amount_total: Mapped[int] = mapped_column(Integer, nullable=False)
     amount_remaining: Mapped[int] = mapped_column(Integer, nullable=False)
     expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), index=True, nullable=True)
+    reason: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

@@ -104,7 +104,7 @@ async def cancel_payment(payment_id: str) -> None:
 
 async def handle_event(db: AsyncSession, event: dict, now) -> str:
     """inPAY hodisasini qayta ishlaydi. Natija satri qaytadi (log/test uchun)."""
-    from app.modules.billing.review import _grant_entitlement  # sikl importdan qochish
+    from app.modules.billing.review import _grant_entitlement, emit_order_paid  # sikl importdan qochish
 
     etype = event.get("type")
     obj = (event.get("data") or {}).get("object") or {}
@@ -168,6 +168,7 @@ async def handle_event(db: AsyncSession, event: dict, now) -> str:
         return "needs_review"
     try:
         await _grant_entitlement(db, order, now)
+        await emit_order_paid(db, order)
         await db.commit()
     except HTTPException:
         # Tarif/kredit berilmadi: buyurtma PAID bo'lmasin, inPAY qayta yuboradi.

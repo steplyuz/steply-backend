@@ -15,6 +15,7 @@ from app.modules.referral.models import Referral, ReferralCode, ReferralCredit, 
 STATUS_PENDING = "pending"
 STATUS_QUALIFIED = "qualified"
 STATUS_CAPPED = "capped"
+STATUS_VOIDED = "voided"  # admin bekor qilgan: kreditlari nolga tushadi
 
 _ALPHABET = string.ascii_uppercase + string.digits
 
@@ -124,6 +125,11 @@ async def qualify_referral(db: AsyncSession, referred_id: uuid.UUID) -> Referral
     ref.status = STATUS_QUALIFIED
     ref.qualified_at = now
     await db.flush()
+    from app.modules.notifications.service import emit_event
+    await emit_event(
+        db, "referral_rewarded", user_id=ref.referrer_id, ref=f"referral-{ref.id}",
+        variables={"credits": str(settings.reward_credits)},
+    )
     return ref
 
 
@@ -191,3 +197,48 @@ async def user_summary(db: AsyncSession, user_id: uuid.UUID) -> dict:
         "credits_available": int(credits),
         "reward": {"credits": settings.reward_credits, "tier_days": settings.reward_tier_days},
     }
+
+
+async def adjust_credits(db: AsyncSession, user_id: uuid.UUID, delta: int, reason: str) -> int:
+    """Admin: bonus kreditni qo'shadi (delta>0) yoki ayiradi (delta<0, FIFO). Yetmasa ValueError."""
+    if delta == 0:
+        raise ValueError("delta 0 bo'lmasligi kerak")
+    if delta > 0:
+        db.add(ReferralCredit(
+            user_id=user_id, referral_id=None, amount_total=delta, amount_remaining=delta,
+            expires_at=None, reason=reason[:200],
+        ))
+        await db.flush()
+        return delta
+    need = -delta
+    rows = (await db.execute(
+        select(ReferralCredit)
+        .where(*_available_credits_filter(user_id, _now()))
+        .order_by(ReferralCredit.id)
+        .with_for_update()
+    )).scalars().all()
+    available = sum(r.amount_remaining for r in rows)
+    if available < need:
+        raise ValueError(f"Yetarli bonus kredit yo'q (mavjud: {available}, so'ralgan: {need})")
+    left = need
+    for row in rows:
+        if left == 0:
+            break
+        step = min(row.amount_remaining, left)
+        row.amount_remaining -= step
+        left -= step
+    await db.flush()
+    return need
+
+
+async def void_referral(db: AsyncSession, ref: Referral, reason: str) -> None:
+    """Admin: referalni bekor qiladi. Shu referaldan berilgan qolgan kreditlar nolga tushadi.
+
+    Eslatma: allaqachon sarflangan kreditlar va berilgan tarif kunlari avtomatik qaytarilmaydi.
+    """
+    ref.status = STATUS_VOIDED
+    rows = (await db.execute(select(ReferralCredit).where(ReferralCredit.referral_id == ref.id))).scalars().all()
+    for row in rows:
+        row.amount_remaining = 0
+        row.reason = f"void: {reason}"[:200]
+    await db.flush()

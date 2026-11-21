@@ -73,6 +73,7 @@ async def approve(db: AsyncSession, order: BillingOrder, reviewer_id: uuid.UUID,
     await _claim_for_review(db, order, BillingOrderStatus.PAID, reviewer_id, note, now)
     try:
         await _grant_entitlement(db, order, now)
+        await emit_order_paid(db, order)
         await db.commit()
     except HTTPException:
         await db.rollback()
@@ -140,3 +141,13 @@ async def reject(db: AsyncSession, order: BillingOrder, reviewer_id: uuid.UUID, 
     await db.commit()
     await db.refresh(order)
     return order
+
+
+async def emit_order_paid(db: AsyncSession, order: BillingOrder) -> None:
+    """Buyurtma to'langach (approve yoki inPAY webhook) xabarnoma hodisasi."""
+    from app.modules.notifications.service import emit_event
+
+    await emit_event(
+        db, "order_paid", user_id=order.user_id, ref=f"order-{order.id}",
+        variables={"title": order.product_title, "amount": str(order.amount)},
+    )

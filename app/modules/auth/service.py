@@ -408,6 +408,8 @@ class AuthService:
         # Referal: taklif qilingan user sifatida bog'lanadi (mukofot onboarding tugaganda)
         from app.modules.referral.service import attach_referral
         await attach_referral(self.db, user.id, referral_code)
+        from app.modules.notifications.service import emit_event
+        await emit_event(self.db, "user_registered", user_id=user.id, ref=f"user-{user.id}")
         full_user = await self._get_user_full(user.id)
         tokens = await self._create_session_and_tokens(full_user, request)
         return RegisterResponse(status="success", token=tokens)

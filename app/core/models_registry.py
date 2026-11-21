@@ -18,3 +18,4 @@ from app.modules.onboarding import models as _onboarding_models  # noqa: F401
 from app.modules.activity import models as _activity_models  # noqa: F401
 from app.modules.referral import models as _referral_models  # noqa: F401
 from app.modules.billing import tier_config as _tier_config_models  # noqa: F401
+from app.modules.notifications import models as _notification_models  # noqa: F401
