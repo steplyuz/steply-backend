@@ -80,6 +80,18 @@ class TierPracticeLimit(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
 
 
+class TierAiLimit(Base):
+    """Obunasi yo'q (FREE) foydalanuvchilar uchun oylik AI kreditlar (Writing + Speaking umumiy pool).
+
+    Obunachilarda limit tarifning ai_limit maydonidan olinadi, bu jadval faqat FREE uchun.
+    """
+    __tablename__ = "tier_ai_limits"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tier: Mapped[SubscriptionTier] = mapped_column(SAEnum(SubscriptionTier, length=7), unique=True, nullable=False)
+    monthly_limit: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
 class TierAnalysisLimit(Base):
     """Practice kvotasidan mustaqil tahlil kvotasi."""
     __tablename__ = "tier_analysis_limits"

@@ -17,7 +17,7 @@ from app.modules.auth.dependencies import require_role
 from app.modules.auth.models import User, UserRole
 from app.modules.billing.models import (
     AICreditGrant, BalanceTransaction, BillingOrder, BillingOrderStatus, BillingProductType,
-    SubscriptionPlan, UserSubscription,
+    SubscriptionPlan, SubscriptionTier, TierAiLimit, UserSubscription,
 )
 
 router = APIRouter(prefix="/admin/credits", tags=["Admin AI Credits"])
@@ -189,3 +189,34 @@ async def adjust_plan_subscribers_credits(
         "skipped_users": skipped,
         "credits_changed_total": changed,
     }
+
+
+# ---------- FREE (obunasiz) foydalanuvchilar uchun oylik AI limit ----------
+
+class FreeAiLimitIn(BaseModel):
+    monthly_limit: int = Field(..., ge=0, le=100000, description="0 = obunasiz userga AI yo'q")
+
+
+@router.get("/free-limit")
+async def get_free_limit(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role(*ADMIN_ROLES)),
+):
+    row = await db.scalar(select(TierAiLimit).where(TierAiLimit.tier == SubscriptionTier.FREE))
+    return {"tier": "free", "monthly_limit": int(row.monthly_limit) if row else 0}
+
+
+@router.put("/free-limit")
+async def set_free_limit(
+    payload: FreeAiLimitIn,
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_role(*ADMIN_ROLES)),
+):
+    row = await db.scalar(select(TierAiLimit).where(TierAiLimit.tier == SubscriptionTier.FREE))
+    if row is None:
+        row = TierAiLimit(tier=SubscriptionTier.FREE, monthly_limit=payload.monthly_limit)
+        db.add(row)
+    else:
+        row.monthly_limit = payload.monthly_limit
+    await db.commit()
+    return {"tier": "free", "monthly_limit": row.monthly_limit}

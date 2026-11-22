@@ -225,6 +225,13 @@ async def enforce_practice_limit(
     await db.flush()
 
 
+async def get_free_ai_limit(db: AsyncSession) -> int:
+    """FREE (obunasiz) foydalanuvchilar uchun oylik AI kredit. Yo'q bo'lsa 0 (AI yo'q)."""
+    from .models import TierAiLimit
+    value = await db.scalar(select(TierAiLimit.monthly_limit).where(TierAiLimit.tier == SubscriptionTier.FREE))
+    return int(value or 0)
+
+
 async def get_ai_quota(db: AsyncSession, user_id) -> dict:
     """Umumiy AI kreditlar (Writing + Speaking): oylik obuna kvotasi + xarid qilingan kreditlar."""
     from .models import AICreditGrant, AIUsage
@@ -249,6 +256,9 @@ async def get_ai_quota(db: AsyncSession, user_id) -> dict:
         AICreditGrant.user_id == user_id,
         AICreditGrant.credits_remaining > 0,
     ))) or 0)
+    if not subs:
+        # Obunasi yo'q (FREE) foydalanuvchi: admin belgilagan oylik AI limit
+        limit = await get_free_ai_limit(db)
     subscription_remaining = max(0, limit - used)
     return {
         "enabled": subscription_remaining > 0 or purchased > 0,
