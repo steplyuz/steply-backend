@@ -10,6 +10,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Literal, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel, Field
@@ -25,8 +26,8 @@ from app.modules.auth.models import User, UserRole
 from app.modules.notifications import gmail, service
 from app.modules.notifications.channels import PermanentChannelError, TransientChannelError
 from app.modules.notifications.models import (
-    EmailAccount, NotificationCategory, NotificationChannel, NotificationMessage, NotificationRule,
-    NotificationStatus, NotificationTemplate, UserNotification,
+    EmailAccount, EmailAccountStatus, NotificationCategory, NotificationChannel, NotificationMessage,
+    NotificationRule, NotificationStatus, NotificationTemplate, UserNotification,
 )
 
 admin_router = APIRouter(prefix="/admin/notifications", tags=["Admin Notifications"])
@@ -336,7 +337,8 @@ async def gmail_callback(
     try:
         tokens = await gmail.exchange_code(code)
         email, name = await gmail.fetch_profile(tokens["access_token"])
-    except (ValueError, KeyError):
+    except (ValueError, KeyError, httpx.HTTPError):
+        # Google tarmog'i xatolari ham admin panelga tushsin, 500 emas
         return RedirectResponse(f"{target}?gmail=error")
     refresh = tokens.get("refresh_token")
     if not refresh:

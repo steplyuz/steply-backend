@@ -6,7 +6,6 @@ enwis.db
 # venv
 venv/
 .venv/
-
 # uploads
 static/avatars/
 static/listening_audio/
