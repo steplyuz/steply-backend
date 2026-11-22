@@ -159,7 +159,8 @@ async def _access_token(account) -> str:
 # ---------- Yuborish ----------
 
 def build_raw_message(
-    from_email: str, from_name: str | None, to: str, subject: str, text: str, list_unsubscribe: str | None
+    from_email: str, from_name: str | None, to: str, subject: str, text: str, list_unsubscribe: str | None,
+    html: str | None = None,
 ) -> str:
     msg = EmailMessage()
     msg["From"] = formataddr((from_name or "", from_email))
@@ -169,14 +170,16 @@ def build_raw_message(
         msg["List-Unsubscribe"] = f"<{list_unsubscribe}>"
         msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     msg.set_content(text)
+    if html:
+        msg.add_alternative(html, subtype="html")
     return base64.urlsafe_b64encode(msg.as_bytes()).decode("ascii")
 
 
-async def send_mail(account, to: str, subject: str, text: str, list_unsubscribe: str | None = None) -> str | None:
+async def send_mail(account, to: str, subject: str, text: str, list_unsubscribe: str | None = None, html: str | None = None) -> str | None:
     if not account.is_active:
         raise PermanentChannelError("Email hisob faol emas")
     token = await _access_token(account)
-    raw = build_raw_message(account.email, account.display_name, to, subject, text, list_unsubscribe)
+    raw = build_raw_message(account.email, account.display_name, to, subject, text, list_unsubscribe, html)
     try:
         async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
             response = await client.post(SEND_URL, json={"raw": raw}, headers={"Authorization": f"Bearer {token}"})

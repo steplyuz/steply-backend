@@ -48,6 +48,8 @@ class NotificationTemplate(Base):
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     subject: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    # Email uchun HTML (ixtiyoriy). Bo'lmasa matndan avtomatik HTML yasaladi.
+    html_body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
@@ -120,6 +122,7 @@ class NotificationMessage(Base):
     template_code: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     subject: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     body: Mapped[str] = mapped_column(Text, nullable=False)
+    html_body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # in_app kanal uchun: bildirishnoma bosilganda ochiladigan havola
     link: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     category: Mapped[str] = mapped_column(

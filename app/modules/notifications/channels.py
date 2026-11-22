@@ -47,6 +47,7 @@ async def send(
     *,
     email_account=None,
     list_unsubscribe: str | None = None,
+    html: str | None = None,
 ) -> str | None:
     """Xabarni kanal orqali yuboradi. Provayder message id ni qaytaradi (bo'lsa)."""
     if channel == "sms":
@@ -58,8 +59,8 @@ async def send(
         if email_account is not None:
             from app.modules.notifications import gmail
 
-            return await gmail.send_mail(email_account, recipient, subject or "", body, list_unsubscribe)
-        return await send_email(recipient, subject or "", body, idempotency_key, list_unsubscribe)
+            return await gmail.send_mail(email_account, recipient, subject or "", body, list_unsubscribe, html)
+        return await send_email(recipient, subject or "", body, idempotency_key, list_unsubscribe, html)
     raise PermanentChannelError(f"Noma'lum kanal: {channel}")
 
 
@@ -106,7 +107,8 @@ async def send_telegram(chat_id: str, text: str) -> str | None:
 
 
 async def send_email(
-    to: str, subject: str, text: str, idempotency_key: str, list_unsubscribe: str | None = None
+    to: str, subject: str, text: str, idempotency_key: str, list_unsubscribe: str | None = None,
+    html: str | None = None,
 ) -> str | None:
     """Resend API orqali (fallback: Gmail hisob ulanmagan bo'lsa)."""
     if not settings.RESEND_API_KEY or not settings.RESEND_FROM_EMAIL:
@@ -119,6 +121,8 @@ async def send_email(
         "Idempotency-Key": idempotency_key[:256],
     }
     payload: dict = {"from": settings.RESEND_FROM_EMAIL, "to": [to], "subject": subject, "text": text}
+    if html:
+        payload["html"] = html
     if list_unsubscribe:
         payload["headers"] = {
             "List-Unsubscribe": f"<{list_unsubscribe}>",

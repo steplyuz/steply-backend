@@ -23,7 +23,7 @@ from app.core.internal_auth import verify_internal_token
 from app.modules.auth.dependencies import require_role
 from app.modules.auth.dependencies import get_current_user
 from app.modules.auth.models import User, UserRole
-from app.modules.notifications import gmail, service
+from app.modules.notifications import email_layout, gmail, service
 from app.modules.notifications.channels import PermanentChannelError, TransientChannelError
 from app.modules.notifications.models import (
     EmailAccount, EmailAccountStatus, NotificationCategory, NotificationChannel, NotificationMessage,
@@ -51,6 +51,8 @@ class TemplateIn(BaseModel):
     title: str = Field(min_length=1, max_length=200)
     subject: Optional[str] = Field(default=None, max_length=255)
     body: str = Field(min_length=1, max_length=10000)
+    # Email uchun HTML (ixtiyoriy). Steply brendi bilan avtomatik o'raladi.
+    html_body: Optional[str] = Field(default=None, max_length=50000)
     is_active: bool = True
 
 
@@ -59,6 +61,7 @@ class TemplatePatch(BaseModel):
     title: Optional[str] = Field(default=None, min_length=1, max_length=200)
     subject: Optional[str] = Field(default=None, max_length=255)
     body: Optional[str] = Field(default=None, min_length=1, max_length=10000)
+    html_body: Optional[str] = Field(default=None, max_length=50000)
     is_active: Optional[bool] = None
 
 
@@ -81,6 +84,21 @@ class SendIn(BaseModel):
     # in_app uchun: bildirishnoma bosilganda ochiladigan havola (masalan /exams)
     link: Optional[str] = Field(default=None, max_length=500)
     send_at: Optional[datetime] = None
+    idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=100)
+
+
+class BroadcastIn(BaseModel):
+    """Barcha faol foydalanuvchilarga bir vaqtda yuborish (in_app va/yoki email va boshqalar)."""
+
+    channels: list[ChannelT] = Field(min_length=1, max_length=4)
+    template_code: Optional[str] = Field(default=None, max_length=64)
+    subject: Optional[str] = Field(default=None, max_length=255)
+    body: Optional[str] = Field(default=None, max_length=10000)
+    html_body: Optional[str] = Field(default=None, max_length=50000)
+    link: Optional[str] = Field(default=None, max_length=500)
+    variables: dict[str, str] = Field(default_factory=dict)
+    category: CategoryT = "transactional"
+    email_account_id: Optional[int] = None
     idempotency_key: Optional[str] = Field(default=None, min_length=8, max_length=100)
 
 
@@ -112,6 +130,7 @@ def _tpl_out(t: NotificationTemplate) -> dict:
         "title": t.title,
         "subject": t.subject,
         "body": t.body,
+        "html_body": t.html_body,
         "is_active": t.is_active,
         "placeholders": sorted(service.placeholders(t.body) | service.placeholders(t.subject or "")),
     }
@@ -215,6 +234,10 @@ async def list_templates(db: AsyncSession = Depends(get_db), _: User = _admin_de
 async def create_template(data: TemplateIn, db: AsyncSession = Depends(get_db), _: User = _admin_dep):
     if data.channel == "email" and not data.subject:
         raise HTTPException(422, "Email shablon uchun subject kerak")
+    try:
+        email_layout.validate_html(data.html_body)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     if await db.scalar(select(NotificationTemplate.id).where(NotificationTemplate.code == data.code)):
         raise HTTPException(409, "Bu kod bilan shablon allaqachon bor")
     tpl = NotificationTemplate(**data.model_dump())
@@ -229,6 +252,10 @@ async def update_template(code: str, data: TemplatePatch, db: AsyncSession = Dep
     if tpl is None:
         raise HTTPException(404, "Shablon topilmadi")
     changes = data.model_dump(exclude_unset=True)
+    try:
+        email_layout.validate_html(changes.get("html_body"))
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
     if "subject" in changes and tpl.channel == "email" and not changes["subject"]:
         raise HTTPException(422, "Email shablon uchun subject bo'sh bo'lmasligi kerak")
     for key, value in changes.items():
@@ -242,10 +269,16 @@ async def preview_template(code: str, data: TemplatePreviewIn, db: AsyncSession 
     tpl = await db.scalar(select(NotificationTemplate).where(NotificationTemplate.code == code))
     if tpl is None:
         raise HTTPException(404, "Shablon topilmadi")
+    # {{name}} yuborishda foydalanuvchi ismi bilan to'ldiriladi; ko'rib chiqishda namuna qiymat
+    variables = {"name": "Foydalanuvchi", **data.variables}
     try:
         return {
-            "subject": service.render(tpl.subject, data.variables) if tpl.subject else None,
-            "body": service.render(tpl.body, data.variables),
+            "subject": service.render(tpl.subject, variables) if tpl.subject else None,
+            "body": service.render(tpl.body, variables),
+            "html": email_layout.wrap(
+                service.render(tpl.html_body, variables) if tpl.html_body else email_layout.text_to_html(service.render(tpl.body, variables)),
+                None,
+            ),
         }
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -410,6 +443,31 @@ async def test_email_account(
         raise HTTPException(502, str(exc)) from exc
     await db.commit()
     return {"status": "sent", "provider_message_id": provider_id}
+
+
+# ---------- Admin: broadcast (barcha foydalanuvchilarga) ----------
+
+@admin_router.post("/broadcast", status_code=202)
+async def admin_broadcast(data: BroadcastIn, db: AsyncSession = Depends(get_db), admin: User = _admin_dep):
+    """Barcha faol foydalanuvchilarga bir vaqtda: in_app, email, sms yoki telegram kanallari bo'yicha."""
+    if not data.template_code and not data.body:
+        raise HTTPException(422, "template_code yoki body kerak")
+    result = await service.broadcast(
+        db,
+        channel_list=list(dict.fromkeys(data.channels)),
+        template_code=data.template_code,
+        subject=data.subject,
+        body=data.body,
+        html_body=data.html_body,
+        link=data.link,
+        variables=data.variables,
+        category=data.category,
+        email_account_id=data.email_account_id,
+        created_by=admin.id,
+        idempotency_key=data.idempotency_key,
+    )
+    await db.commit()
+    return result
 
 
 # ---------- Admin: yuborish va navbat ----------

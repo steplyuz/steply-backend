@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.keys import derive_key
 from app.modules.auth.models import ContactType, User, UserContact, UserProfile
-from app.modules.notifications import channels
+from app.modules.notifications import channels, email_layout
 from app.modules.notifications.channels import PermanentChannelError
 from app.modules.notifications.gmail import GmailAuthError
 from app.modules.notifications.models import (
@@ -206,6 +206,7 @@ async def enqueue(
     category: str = NotificationCategory.TRANSACTIONAL,
     email_account_id: int | None = None,
     link: str | None = None,
+    html_body: str | None = None,
 ) -> NotificationMessage:
     if idempotency_key:
         existing = await db.scalar(
@@ -216,7 +217,7 @@ async def enqueue(
     msg = NotificationMessage(
         channel=channel, recipient=recipient, body=body, subject=subject, user_id=user_id,
         template_code=template_code, idempotency_key=idempotency_key, created_by=created_by,
-        category=category, email_account_id=email_account_id, link=link,
+        category=category, email_account_id=email_account_id, link=link, html_body=html_body,
         status=NotificationStatus.QUEUED, attempts=0, next_attempt_at=send_at or _now(),
     )
     db.add(msg)
@@ -240,6 +241,7 @@ async def queue_send(
     category: str = NotificationCategory.TRANSACTIONAL,
     email_account_id: int | None = None,
     link: str | None = None,
+    html_body: str | None = None,
 ) -> tuple[list[NotificationMessage], int]:
     """Qabul qiluvchilarga xabar navbatga qo'yadi. (xabarlar, o'tkazib yuborilganlar soni) qaytaradi.
 
@@ -272,10 +274,17 @@ async def queue_send(
         if tpl.channel != channel:
             raise HTTPException(422, f"Shablon '{tpl.code}' kanali {tpl.channel}, so'ralgan: {channel}")
         body_tpl, subject_tpl = tpl.body, tpl.subject
+        html_tpl = tpl.html_body
     else:
         if not body:
             raise HTTPException(422, "template_code yoki body kerak")
         body_tpl, subject_tpl = body, subject
+        html_tpl = html_body
+
+    try:
+        email_layout.validate_html(html_tpl)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
     # 1) Barcha qabul qiluvchilarni va matnlarni tayyorlaymiz (xato bo'lsa hech narsa yozilmaydi)
     prepared: list[dict] = []
@@ -289,6 +298,7 @@ async def queue_send(
         try:
             item["body"] = render(body_tpl, item["vars"])
             item["subject"] = render(subject_tpl, item["vars"]) if subject_tpl else None
+            item["html"] = render(html_tpl, item["vars"]) if html_tpl else None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         if channel == NotificationChannel.EMAIL and not item["subject"]:
@@ -320,6 +330,7 @@ async def queue_send(
             category=category,
             email_account_id=email_account_id,
             link=link,
+            html_body=item["html"],
         ))
     return messages, skipped
 
@@ -418,6 +429,8 @@ async def process_due(db: AsyncSession, batch_size: int = 50) -> dict[str, int]:
                     idempotency_key=f"notif-{msg.id}",
                     email_account=account,
                     list_unsubscribe=unsubscribe,
+                    html=(email_layout.wrap(msg.html_body or email_layout.text_to_html(msg.body), unsubscribe)
+                          if msg.channel == NotificationChannel.EMAIL else None),
                 )
             msg.status = NotificationStatus.SENT
             msg.sent_at = _now()
@@ -475,3 +488,94 @@ async def stats_by_status(db: AsyncSession) -> dict[str, dict[str, int]]:
     for channel, status, n in rows:
         out.setdefault(channel, {})[status] = int(n)
     return out
+
+
+# ---------- Broadcast: barcha faol foydalanuvchilarga ----------
+
+BROADCAST_BATCH = 500
+
+
+async def _eligible_user_ids(db: AsyncSession, channel: str, user_ids: list[uuid.UUID]) -> list[uuid.UUID]:
+    """Shu kanal bo'yicha manzili bor foydalanuvchilar (manzili yo'qlari o'tkazib yuboriladi)."""
+    if channel == NotificationChannel.IN_APP:
+        return list(user_ids)
+    if channel == NotificationChannel.TELEGRAM:
+        rows = await db.execute(select(User.id).where(User.id.in_(user_ids), User.telegram_user_id.is_not(None)))
+        return list(rows.scalars().all())
+    ctype = ContactType.EMAIL if channel == NotificationChannel.EMAIL else ContactType.PHONE
+    rows = await db.execute(
+        select(UserContact.user_id)
+        .where(UserContact.user_id.in_(user_ids), UserContact.contact_type == ctype)
+        .distinct()
+    )
+    return list(rows.scalars().all())
+
+
+async def broadcast(
+    db: AsyncSession,
+    *,
+    channel_list: list[str],
+    template_code: str | None,
+    subject: str | None,
+    body: str | None,
+    html_body: str | None,
+    link: str | None,
+    variables: dict[str, Any],
+    category: str,
+    email_account_id: int | None,
+    created_by: uuid.UUID | None,
+    idempotency_key: str | None,
+) -> dict[str, Any]:
+    """Barcha faol foydalanuvchilarga bir vaqtda bir nechta kanal orqali xabar navbatga qo'yadi.
+
+    Hammasi bitta so'rov tranzaksiyasida: xato bo'lsa hech narsa yozilmaydi. Userlar BROADCAST_BATCH
+    tadan bo'lib ishlanadi. Shablon tanlansa, kanal shablon kanali bilan bir xil bo'lishi kerak.
+    """
+    if template_code:
+        tpl = await get_template(db, template_code)
+        if channel_list != [tpl.channel]:
+            raise HTTPException(422, f"Shablon kanali {tpl.channel}: faqat shu kanalni tanlang")
+
+    summary: dict[str, Any] = {
+        "queued": 0,
+        "skipped_opted_out": 0,
+        "skipped_no_address": 0,
+        "per_channel": {c: 0 for c in channel_list},
+    }
+    offset = 0
+    chunk_no = 0
+    while True:
+        batch = list((await db.execute(
+            select(User.id).where(User.is_active.is_(True)).order_by(User.id).offset(offset).limit(BROADCAST_BATCH)
+        )).scalars().all())
+        if not batch:
+            break
+        offset += len(batch)
+        for ch in channel_list:
+            eligible = await _eligible_user_ids(db, ch, batch)
+            summary["skipped_no_address"] += len(batch) - len(eligible)
+            if not eligible:
+                continue
+            key = f"{idempotency_key}:{ch}:{chunk_no}" if idempotency_key else None
+            msgs, skipped = await queue_send(
+                db,
+                channel=ch,
+                template_code=template_code,
+                subject=subject,
+                body=body,
+                user_ids=eligible,
+                recipients=[],
+                variables=dict(variables),
+                send_at=None,
+                idempotency_key=key,
+                created_by=created_by,
+                category=category,
+                email_account_id=email_account_id if ch == NotificationChannel.EMAIL else None,
+                link=link if ch == NotificationChannel.IN_APP else None,
+                html_body=html_body if ch == NotificationChannel.EMAIL else None,
+            )
+            summary["queued"] += len(msgs)
+            summary["skipped_opted_out"] += skipped
+            summary["per_channel"][ch] += len(msgs)
+        chunk_no += 1
+    return summary
