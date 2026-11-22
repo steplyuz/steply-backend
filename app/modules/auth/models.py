@@ -137,6 +137,8 @@ class User(Base, TimestampMixin):
     # ism / telefon identifikator EMAS — ular o'zgarishi yoki boshqaga
     # o'tishi mumkin. Bitta Telegram akkaunt ko'pi bilan bitta Steply
     # akkauntga bog'lanadi (UNIQUE).
+    # Qanday ro'yxatdan o'tgan: phone_sms | phone_telegram | google | telegram_login | unknown (eski akkauntlar)
+    registration_method: Mapped[Optional[str]] = mapped_column(String(24), nullable=True, index=True)
     telegram_user_id: Mapped[Optional[int]] = mapped_column(
         BigInteger,
         unique=True,

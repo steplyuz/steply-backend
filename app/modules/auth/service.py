@@ -170,6 +170,7 @@ class AuthService:
         gender: Optional[Gender] = None,
         phone: Optional[str] = None,
         telegram_user_id: Optional[int] = None,
+        registration_method: str = "phone_sms",
     ) -> User:
         """Oddiy STUDENT akkaunt yaratadi (User + UserProfile [+ telefon kontakti]).
 
@@ -189,6 +190,7 @@ class AuthService:
             is_active=True,
             hashed_password=hashed_password,
             telegram_user_id=telegram_user_id,
+            registration_method=registration_method,
         )
         self.db.add(user)
         await self.db.flush()
@@ -381,6 +383,7 @@ class AuthService:
                 gender=gender,
                 phone=phone,
                 telegram_user_id=tg_id,
+                registration_method="phone_sms" if sms_path else "phone_telegram",
             )
             profile = (await self.db.execute(
                 select(UserProfile).where(UserProfile.user_id == user.id)

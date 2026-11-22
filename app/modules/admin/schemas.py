@@ -50,6 +50,7 @@ class AdminUserSummary(BaseModel):
     username: Optional[str] = None
     # Eng so'nggi imtihon ro'yxatidagi MK ID (profilda saqlanmaydi).
     mk_id: Optional[str] = None
+    registration_method: Optional[str] = None
     created_at: datetime
 
 class SmsRegistrationSetting(BaseModel):

@@ -124,17 +124,18 @@ async def export_users(_: User = _admin_dep, service: AdminService = Depends(_ge
 
 
 @router.get("/users", response_model=List[AdminUserSummary])
-async def admin_users(search: Optional[str] = Query(None, max_length=100), role: Optional[UserRole] = None, is_active: Optional[bool] = None, offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200), db: AsyncSession = Depends(get_db), _: User = _admin_dep):
+async def admin_users(search: Optional[str] = Query(None, max_length=100), role: Optional[UserRole] = None, is_active: Optional[bool] = None, registration_method: Optional[str] = Query(None, max_length=24), offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=200), db: AsyncSession = Depends(get_db), _: User = _admin_dep):
     stmt = select(User).options(selectinload(User.profile)).order_by(User.created_at.desc()).offset(offset).limit(limit)
     if role is not None: stmt = stmt.where(User.global_role == role)
     if is_active is not None: stmt = stmt.where(User.is_active.is_(is_active))
+    if registration_method: stmt = stmt.where(User.registration_method == registration_method)
     if search:
         q=f"%{search.strip()}%"
         # MK ID bo'yicha qidiruv endi mock_registrations orqali ketadi.
         stmt=stmt.outerjoin(UserProfile).outerjoin(MockRegistration, MockRegistration.user_id==User.id).where(or_(UserProfile.full_name.ilike(q), UserProfile.username.ilike(q), MockRegistration.student_id.ilike(q)))
     rows=(await db.execute(stmt)).scalars().unique().all()
     mk_ids = await _latest_mk_ids(db, [u.id for u in rows])
-    return [AdminUserSummary(id=u.id,is_active=u.is_active,global_role=u.global_role,full_name=u.profile.full_name if u.profile else None,username=u.profile.username if u.profile else None,mk_id=mk_ids.get(u.id),created_at=u.created_at) for u in rows]
+    return [AdminUserSummary(id=u.id,registration_method=u.registration_method,is_active=u.is_active,global_role=u.global_role,full_name=u.profile.full_name if u.profile else None,username=u.profile.username if u.profile else None,mk_id=mk_ids.get(u.id),created_at=u.created_at) for u in rows]
 
 
 @router.get("/users/{user_id}")
@@ -142,7 +143,7 @@ async def admin_user_detail(user_id: uuid.UUID, db: AsyncSession = Depends(get_d
     stmt=select(User).options(selectinload(User.profile),selectinload(User.contacts),selectinload(User.sessions)).where(User.id==user_id)
     u=(await db.execute(stmt)).scalar_one_or_none()
     if not u: raise HTTPException(404,"Foydalanuvchi topilmadi")
-    return {"id":u.id,"is_active":u.is_active,"global_role":u.global_role,"profile":u.profile,"contacts":u.contacts,"sessions":[{"id":str(s.id),"expires_at":s.expires_at,"is_revoked":s.is_revoked} for s in u.sessions]}
+    return {"id":u.id,"registration_method":u.registration_method,"is_active":u.is_active,"global_role":u.global_role,"profile":u.profile,"contacts":u.contacts,"sessions":[{"id":str(s.id),"expires_at":s.expires_at,"is_revoked":s.is_revoked} for s in u.sessions]}
 
 
 @router.patch("/users/{user_id}", response_model=AdminUserSummary)
@@ -167,7 +168,7 @@ async def admin_update_user(user_id: uuid.UUID, data: AdminUserUpdate, db: Async
     for k,v in update_data.items(): setattr(u,k,v)
     await db.commit(); await db.refresh(u)
     mk_ids = await _latest_mk_ids(db, [u.id])
-    return AdminUserSummary(id=u.id,is_active=u.is_active,global_role=u.global_role,full_name=u.profile.full_name if u.profile else None,username=u.profile.username if u.profile else None,mk_id=mk_ids.get(u.id),created_at=u.created_at)
+    return AdminUserSummary(id=u.id,registration_method=u.registration_method,is_active=u.is_active,global_role=u.global_role,full_name=u.profile.full_name if u.profile else None,username=u.profile.username if u.profile else None,mk_id=mk_ids.get(u.id),created_at=u.created_at)
 
 
 @router.get("/registrations")

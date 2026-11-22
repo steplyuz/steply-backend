@@ -629,6 +629,7 @@ class TelegramOIDCService:
                     is_active=True,
                     hashed_password=None,
                     telegram_user_id=telegram_id,
+                    registration_method="telegram_login",
                 )
                 self.db.add(user)
                 await self.db.flush()

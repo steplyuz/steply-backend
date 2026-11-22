@@ -5,6 +5,7 @@ enwis.db
 
 # venv
 venv/
+.venv/
 
 # uploads
 static/avatars/

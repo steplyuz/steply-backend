@@ -52,6 +52,7 @@ from app.modules.referral.router import router as referral_router  # noqa: E402
 from app.modules.referral.admin_router import router as admin_referral_router  # noqa: E402
 from app.modules.notifications.router import admin_router as admin_notifications_router, internal_router as internal_notifications_router, public_router as notifications_public_router, inbox_router as notifications_inbox_router  # noqa: E402
 from app.modules.billing.credit_admin import router as admin_credit_router  # noqa: E402
+from app.modules.billing.subscription_admin import router as admin_subscriptions_router  # noqa: E402
 from app.modules.analysis.router import router as analysis_router, admin_router as admin_analysis_router
 from app.modules.exams.auth.router import router as exams_auth_router, exams_router
 
@@ -229,6 +230,7 @@ api_routers = (
     admin_notifications_router, internal_notifications_router, notifications_public_router,
     notifications_inbox_router,
     admin_credit_router,
+    admin_subscriptions_router,
 )
 for router in api_routers:
     app.include_router(router, prefix="/api/v1")

@@ -254,7 +254,7 @@ class GoogleOIDCService:
             " ".join(x for x in (claims.get("given_name"), claims.get("family_name")) if x), 255) or "Google User"
         try:
             async with self.db.begin_nested():
-                user = User(global_role=UserRole.STUDENT, is_active=True, hashed_password=None)
+                user = User(global_role=UserRole.STUDENT, is_active=True, hashed_password=None, registration_method="google")
                 self.db.add(user)
                 await self.db.flush()
                 self.db.add(UserProfile(user_id=user.id, full_name=full_name,
