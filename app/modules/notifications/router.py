@@ -79,7 +79,7 @@ class SendIn(BaseModel):
     variables: dict[str, str] = Field(default_factory=dict)
     # transactional: doim yuboriladi. marketing: opt-out qilganlarga yuborilmaydi + unsubscribe havolasi
     category: CategoryT = "transactional"
-    # Email uchun qaysi Gmail hisobdan (None = default hisob, yo'q bo'lsa Resend)
+    # Email uchun aniq Gmail hisob. None = Resend (korporativ domen, default)
     email_account_id: Optional[int] = None
     # in_app uchun: bildirishnoma bosilganda ochiladigan havola (masalan /exams)
     link: Optional[str] = Field(default=None, max_length=500)

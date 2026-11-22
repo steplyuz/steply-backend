@@ -169,7 +169,16 @@ async def default_email_account(db: AsyncSession) -> EmailAccount | None:
     )
 
 
+def _resend_configured() -> bool:
+    return bool(settings.RESEND_API_KEY and settings.RESEND_FROM_EMAIL)
+
+
 async def _pick_email_account(db: AsyncSession, account_id: int | None) -> EmailAccount | None:
+    """Yuboruvchi hisob. Tartib:
+    1) xabarda aniq tanlangan email_account_id (masalan Gmail) — shu ishlatiladi;
+    2) aks holda Resend sozlangan bo'lsa — Resend (korporativ domen, default);
+    3) Resend sozlanmagan bo'lsa — default Gmail hisob.
+    """
     if account_id is not None:
         account = await db.get(EmailAccount, account_id)
         if account is None or not account.is_active:
@@ -177,7 +186,9 @@ async def _pick_email_account(db: AsyncSession, account_id: int | None) -> Email
         if account.status != EmailAccountStatus.OK:
             raise GmailAuthError(account.id, "Email hisob qayta ulanishi kerak")
         return account
-    return await default_email_account(db)  # None bo'lsa Resend fallback
+    if _resend_configured():
+        return None  # channels.send_email -> Resend
+    return await default_email_account(db)
 
 
 # ---------- Shablon va navbat ----------
