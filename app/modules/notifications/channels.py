@@ -51,8 +51,7 @@ async def send(
 ) -> str | None:
     """Xabarni kanal orqali yuboradi. Provayder message id ni qaytaradi (bo'lsa)."""
     if channel == "sms":
-        await send_sms(recipient, body)
-        return None
+        return await send_sms(recipient, body)
     if channel == "telegram":
         return await send_telegram(recipient, body)
     if channel == "email":
@@ -64,17 +63,20 @@ async def send(
     raise PermanentChannelError(f"Noma'lum kanal: {channel}")
 
 
-async def send_sms(phone: str, text: str) -> None:
-    from app.modules.auth.sms import SmsService
+async def send_sms(phone: str, text: str) -> str | None:
+    """SMS yuboradi. Eskiz xabar ID sini qaytaradi (bo'lsa)."""
+    from app.modules.auth.sms import SmsApiError, SmsNotConfigured, SmsService
 
-    if not settings.ESKIZ_EMAIL or not settings.ESKIZ_PASSWORD:
-        raise PermanentChannelError("Eskiz SMS sozlanmagan (ESKIZ_EMAIL/ESKIZ_PASSWORD)")
     try:
-        await SmsService.send_text(phone, text)
-    except ValueError as exc:  # telefon formati noto'g'ri
+        return await SmsService.send_text(phone, text)
+    except (SmsNotConfigured, ValueError) as exc:  # sozlama yo'q yoki telefon formati noto'g'ri
         raise PermanentChannelError(str(exc)) from exc
-    except (httpx.HTTPError, RuntimeError) as exc:
+    except SmsApiError as exc:
+        if exc.is_permanent:  # masalan 400/403/422: qayta urinish befoyda
+            raise PermanentChannelError(str(exc)) from exc
         raise TransientChannelError("SMS yuborishda vaqtinchalik xato") from exc
+    except httpx.HTTPError as exc:
+        raise TransientChannelError("SMS tarmoq xatosi") from exc
 
 
 async def send_telegram(chat_id: str, text: str) -> str | None:

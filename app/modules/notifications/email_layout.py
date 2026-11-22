@@ -29,6 +29,29 @@ def text_to_html(text: str | None) -> str:
     return _html.escape(text or "").replace("\n", "<br>")
 
 
+def heading(text: str) -> str:
+    """Email ichidagi sarlavha (ichki HTML uchun; matn escape qilinadi)."""
+    return (
+        f'<h1 style="margin:0 0 16px;font-size:22px;line-height:1.3;font-weight:700;color:{BRAND_DARK};">'
+        + _html.escape(text) + '</h1>'
+    )
+
+
+def paragraph(text: str) -> str:
+    return '<p style="margin:0 0 14px;font-size:15px;line-height:1.6;color:#0F2A1C;">' + _html.escape(text) + '</p>'
+
+
+def button(label: str, url: str) -> str:
+    """Brend tugmasi (lime fon, to'q yashil matn). Email klientlarda ishonchli ishlashi uchun jadval."""
+    return (
+        '<table role="presentation" cellpadding="0" cellspacing="0" style="margin:24px 0 8px;"><tr>'
+        f'<td style="border-radius:999px;background:{BRAND_LIME};">'
+        f'<a href="{_html.escape(url, quote=True)}" style="display:inline-block;padding:12px 26px;'
+        f'font-size:15px;font-weight:700;color:{BRAND_DARK};text-decoration:none;border-radius:999px;">'
+        + _html.escape(label) + '</a></td></tr></table>'
+    )
+
+
 def wrap(inner_html: str, unsubscribe_url: str | None = None) -> str:
     """Ichki HTML'ni Steply brendli to'liq email hujjatiga o'raydi."""
     unsub = ""

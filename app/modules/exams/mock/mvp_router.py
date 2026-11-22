@@ -6,7 +6,10 @@ speaking -> final result.
 """
 from datetime import datetime, timezone
 import io
+import logging
 import qrcode
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
@@ -381,14 +384,14 @@ async def _send_result_sms(db: AsyncSession, result: MockExamResult) -> bool:
         return False
     try:
         from app.modules.auth.sms import SmsService
-        SmsService.LOGIN_EMAIL = settings.ESKIZ_EMAIL
-        SmsService.LOGIN_PASSWORD = settings.ESKIZ_PASSWORD
-        SmsService.send_result_ready(contact)
-        result.sms_sent_at = datetime.now(timezone.utc)
-        await db.commit()
-        return True
+        # Eskiz javobi kutiladi: yuborilmagan SMS "yuborildi" deb belgilanmasin
+        await SmsService.send_result_ready(contact)
     except Exception:
+        logger.exception("Natija SMS yuborilmadi (result_id=%s)", result.id)
         return False
+    result.sms_sent_at = datetime.now(timezone.utc)
+    await db.commit()
+    return True
 
 
 # Public/user routes and admin routes are included separately in router.py.

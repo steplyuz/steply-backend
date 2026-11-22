@@ -151,3 +151,8 @@ async def emit_order_paid(db: AsyncSession, order: BillingOrder) -> None:
         db, "order_paid", user_id=order.user_id, ref=f"order-{order.id}",
         variables={"title": order.product_title, "amount": str(order.amount)},
     )
+    if order.product_type == BillingProductType.SUBSCRIPTION:
+        await emit_event(
+            db, "subscription_activated", user_id=order.user_id, ref=f"order-{order.id}-activated",
+            variables={"plan": order.product_title},
+        )

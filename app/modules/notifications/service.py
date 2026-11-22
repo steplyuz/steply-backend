@@ -5,6 +5,7 @@ Qayta urinish: 1, 2, 4 ... daqiqa (1 soatgacha), max_attempts gacha.
 """
 from __future__ import annotations
 
+import html as _html
 import logging
 import re
 import uuid
@@ -38,7 +39,14 @@ EVENTS: dict[str, str] = {
     "user_registered": "Yangi foydalanuvchi ro'yxatdan o'tdi",
     "order_paid": "Buyurtma to'landi / tasdiqlandi",
     "referral_rewarded": "Referal mukofoti berildi",
+    "subscription_activated": "Obuna sotib olindi va faollashdi",
+    "subscription_expiring": "Obuna muddati tugashidan oldin (ogohlantirish)",
+    "subscription_expired": "Obuna muddati tugadi",
 }
+
+
+def site_url() -> str:
+    return settings.PUBLIC_BASE_URL or f"https://{settings.AUTH_DOMAIN}"
 
 
 def _now() -> datetime:
@@ -309,7 +317,8 @@ async def queue_send(
         try:
             item["body"] = render(body_tpl, item["vars"])
             item["subject"] = render(subject_tpl, item["vars"]) if subject_tpl else None
-            item["html"] = render(html_tpl, item["vars"]) if html_tpl else None
+            # HTML ichiga qiymatlar escape qilib qo'yiladi (ism/plan HTML inyeksiya qilmasin)
+            item["html"] = render(html_tpl, {k: _html.escape(str(v), quote=True) for k, v in item["vars"].items()}) if html_tpl else None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
         if channel == NotificationChannel.EMAIL and not item["subject"]:
@@ -362,6 +371,8 @@ async def emit_event(
     if event_code not in EVENTS:
         logger.error("notification: noma'lum hodisa %s", event_code)
         return 0
+    # {{site}} har doim mavjud bo'lsin (shablonlar sayt havolasidan foydalanishi mumkin)
+    variables = {"site": site_url(), **(variables or {})}
     rules = (await db.execute(
         select(NotificationRule).where(
             NotificationRule.event_code == event_code, NotificationRule.is_active.is_(True),
@@ -590,3 +601,27 @@ async def broadcast(
             summary["per_channel"][ch] += len(msgs)
         chunk_no += 1
     return summary
+
+
+# ---------- Standart shablon va qoidalar ----------
+
+async def seed_defaults(db: AsyncSession) -> dict[str, int]:
+    """Standart shablon va hodisa qoidalarini qo'shadi. Mavjudlari o'zgarmaydi (idempotent)."""
+    from app.modules.notifications.defaults import DEFAULT_RULES, DEFAULT_TEMPLATES
+
+    templates_created = rules_created = 0
+    for spec in DEFAULT_TEMPLATES:
+        exists = await db.scalar(select(NotificationTemplate.id).where(NotificationTemplate.code == spec["code"]))
+        if exists is None:
+            db.add(NotificationTemplate(**spec, is_active=True))
+            templates_created += 1
+    await db.flush()
+    for event_code, channel, template_code in DEFAULT_RULES:
+        exists = await db.scalar(select(NotificationRule.id).where(
+            NotificationRule.event_code == event_code, NotificationRule.channel == channel,
+        ))
+        if exists is None:
+            db.add(NotificationRule(event_code=event_code, channel=channel, template_code=template_code, is_active=True))
+            rules_created += 1
+    await db.commit()
+    return {"templates_created": templates_created, "rules_created": rules_created}

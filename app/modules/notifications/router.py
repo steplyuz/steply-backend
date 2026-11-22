@@ -46,7 +46,8 @@ _admin_dep = Depends(require_role(*ADMIN_ROLES))
 # ---------- Schemalar ----------
 
 class TemplateIn(BaseModel):
-    code: str = Field(pattern=r"^[a-z][a-z0-9_]{2,63}$")
+    # Bo'sh qoldirilsa tizim avtomatik kod beradi: tpl_<id>
+    code: Optional[str] = Field(default=None, pattern=r"^[a-z][a-z0-9_]{2,63}$")
     channel: ChannelT
     title: str = Field(min_length=1, max_length=200)
     subject: Optional[str] = Field(default=None, max_length=255)
@@ -238,12 +239,58 @@ async def create_template(data: TemplateIn, db: AsyncSession = Depends(get_db), 
         email_layout.validate_html(data.html_body)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
-    if await db.scalar(select(NotificationTemplate.id).where(NotificationTemplate.code == data.code)):
-        raise HTTPException(409, "Bu kod bilan shablon allaqachon bor")
-    tpl = NotificationTemplate(**data.model_dump())
-    db.add(tpl)
+    payload = data.model_dump()
+    if payload["code"] is None:
+        # Avtomatik ID: vaqtinchalik noyob kod bilan saqlaymiz, DB id olingach tpl_<id> ga o'zgartiramiz
+        payload["code"] = f"tmp_{uuid.uuid4().hex[:24]}"
+        tpl = NotificationTemplate(**payload)
+        db.add(tpl)
+        await db.flush()
+        final_code = f"tpl_{tpl.id}"
+        if await db.scalar(select(NotificationTemplate.id).where(NotificationTemplate.code == final_code)):
+            raise HTTPException(409, "Avtomatik kod band, qayta urinib ko'ring")
+        tpl.code = final_code
+    else:
+        if await db.scalar(select(NotificationTemplate.id).where(NotificationTemplate.code == payload["code"])):
+            raise HTTPException(409, "Bu kod bilan shablon allaqachon bor")
+        tpl = NotificationTemplate(**payload)
+        db.add(tpl)
     await db.commit()
     return _tpl_out(tpl)
+
+
+@admin_router.delete("/templates/{code}", status_code=204)
+async def delete_template(
+    code: str,
+    force: bool = Query(False, description="True bo'lsa, shablonga bog'liq qoidalar ham o'chiriladi"),
+    db: AsyncSession = Depends(get_db),
+    _: User = _admin_dep,
+):
+    """Shablonni to'liq o'chiradi. Yuborilgan xabarlar tarixi (template_code) saqlanadi."""
+    tpl = await db.scalar(select(NotificationTemplate).where(NotificationTemplate.code == code))
+    if tpl is None:
+        raise HTTPException(404, "Shablon topilmadi")
+    rules = (await db.execute(select(NotificationRule).where(NotificationRule.template_code == code))).scalars().all()
+    if rules and not force:
+        used = ", ".join(sorted({f"{r.event_code}/{r.channel}" for r in rules}))
+        raise HTTPException(409, f"Shablon qoidalarda ishlatilmoqda: {used}. force=true bilan qoidalar bilan birga o'chiring")
+    for rule in rules:
+        await db.delete(rule)
+    await db.delete(tpl)
+    await db.commit()
+
+
+@admin_router.post("/seed-defaults")
+async def seed_default_templates(db: AsyncSession = Depends(get_db), _: User = _admin_dep):
+    """Standart shablon va qoidalarni qo'shadi. Mavjudlari o'zgarmaydi."""
+    return await service.seed_defaults(db)
+
+
+@admin_router.post("/scan-subscriptions")
+async def scan_subscriptions_now(db: AsyncSession = Depends(get_db), _: User = _admin_dep):
+    """Obuna muddati tugashi bo'yicha xabarlarni darhol tekshirish (worker kutmasdan)."""
+    from app.modules.billing.subscription_notifications import scan_subscription_events
+    return await scan_subscription_events(db)
 
 
 @admin_router.patch("/templates/{code}")
@@ -530,6 +577,50 @@ async def notification_stats(db: AsyncSession = Depends(get_db), _: User = _admi
 async def process_now(batch: int = Query(50, ge=1, le=500), db: AsyncSession = Depends(get_db), _: User = _admin_dep):
     """Navbatdagi xabarlarni darhol yuborish (worker kutmasdan)."""
     return await service.process_due(db, batch_size=batch)
+
+
+# ---------- Eskiz SMS provayder (faqat o'qish va hisobot) ----------
+
+def _eskiz_error(exc: "SmsApiError") -> HTTPException:
+    return HTTPException(502, detail=f"Eskiz: {exc.message}")
+
+
+@admin_router.get("/sms/prices")
+async def sms_prices(_: User = _admin_dep):
+    from app.modules.auth.sms import SmsApiError, SmsNotConfigured, SmsService
+    try:
+        return await SmsService.prices()
+    except SmsNotConfigured as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+    except SmsApiError as exc:
+        raise _eskiz_error(exc) from exc
+
+
+@admin_router.get("/sms/status/{sms_id}")
+async def sms_status(sms_id: str, _: User = _admin_dep):
+    from app.modules.auth.sms import SmsApiError, SmsNotConfigured, SmsService
+    try:
+        return await SmsService.status_by_id(sms_id)
+    except SmsNotConfigured as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+    except SmsApiError as exc:
+        raise _eskiz_error(exc) from exc
+
+
+@admin_router.get("/sms/dispatch/{dispatch_id}/report")
+async def sms_dispatch_report(
+    dispatch_id: str,
+    status: Optional[Literal["delivered", "rejected"]] = Query(None),
+    is_ad: Optional[bool] = Query(None),
+    _: User = _admin_dep,
+):
+    from app.modules.auth.sms import SmsApiError, SmsNotConfigured, SmsService
+    try:
+        return await SmsService.dispatch_report(dispatch_id, is_ad=is_ad, status=status)
+    except SmsNotConfigured as exc:
+        raise HTTPException(503, detail=str(exc)) from exc
+    except SmsApiError as exc:
+        raise _eskiz_error(exc) from exc
 
 
 # ---------- Ichki API (boshqa servislar) ----------
